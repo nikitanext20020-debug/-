@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Request, Depends
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -26,16 +28,29 @@ from telethon.tl.functions.account import UpdateUsernameRequest, UpdateProfileRe
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        noisy_endpoints = ['/logs', '/accounts', '/stats', '/settings', '/proxies', '/discovery', '/comments']
+        noisy_endpoints = ['/logs', '/accounts', '/stats', '/settings', '/proxies', '/discovery', '/comments', '/health']
         return not any(ep in msg and '200' in msg for ep in noisy_endpoints)
 
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
-from dashboard.backend.auth_manager import AuthManager
-from dashboard.backend.worker import BotWorker
+
+# FIX: импорты были битые (dashboard.backend.* вместо backend.*)
+from backend.auth_manager import AuthManager
+from backend.worker import BotWorker, set_global_pause as worker_set_global_pause
 from modules.channel_explorer import ChannelExplorer
+from modules.channel_health_watcher import ChannelHealthWatcher
+
+# Корни проекта
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+STATIC_DIR = os.path.join(ROOT_DIR, 'static')
+SESSIONS_DIR = os.path.join(ROOT_DIR, 'sessions')
+
+# Холдер для глобального health-watcher
+health_watcher: Optional[ChannelHealthWatcher] = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global health_watcher
     # Очистка старых логов при старте (старше 7 дней)
     deleted_logs = db.cleanup_old_logs(days=7)
     if deleted_logs > 0:
@@ -46,14 +61,70 @@ async def lifespan(app: FastAPI):
     if closed > 0:
         print(f"🧹 Удалено {closed} каналов с закрытыми комментариями")
     
+    # Запуск фонового watcher базы каналов
+    health_watcher = ChannelHealthWatcher(db, workers_registry=workers)
+    health_watcher.start()
+    print("👁️  ChannelHealthWatcher запущен (валидация каналов в фоне)")
+    
+    # Авто-старт ранее активных аккаунтов (для "автономно через хост")
+    if os.getenv('AUTOSTART_WORKERS', '1') == '1':
+        try:
+            for acc in db.get_accounts():
+                if acc.get('status') == 'active':
+                    _start_worker_for_account(acc)
+                    print(f"🚀 Авто-старт воркера для {acc.get('phone')}")
+        except Exception as e:
+            print(f"[AUTOSTART] Ошибка: {e}")
+    
     yield
+    
+    # Shutdown
+    if health_watcher:
+        health_watcher.stop()
+    for w in list(workers.values()):
+        try:
+            w.stop()
+        except Exception:
+            pass
+
 
 app = FastAPI(title="Neuro-Commenting API", lifespan=lifespan)
 
-# Настройка CORS
+
+# --- Bearer-token middleware (опциональный, включается через DASHBOARD_TOKEN) ---
+DASHBOARD_TOKEN = os.getenv('DASHBOARD_TOKEN', '').strip()
+PUBLIC_PATHS = {'/', '/index.html', '/login', '/health', '/favicon.ico', '/auth-status'}
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if not DASHBOARD_TOKEN:
+        # Auth выключен — пропускаем всё (для локальной разработки)
+        return await call_next(request)
+    path = request.url.path
+    # Публичные пути и static — без авторизации
+    if path in PUBLIC_PATHS or path.startswith('/static/') or path.startswith('/assets/'):
+        return await call_next(request)
+    # Пропускаем preflight CORS
+    if request.method == 'OPTIONS':
+        return await call_next(request)
+    # Принимаем токен либо из заголовка, либо из query (?token=)
+    auth_header = request.headers.get('authorization', '')
+    token = ''
+    if auth_header.lower().startswith('bearer '):
+        token = auth_header[7:].strip()
+    if not token:
+        token = request.query_params.get('token', '').strip()
+    if token != DASHBOARD_TOKEN:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+# CORS — ограничиваем (если задан DASHBOARD_ORIGIN), иначе * для разработки
+allow_origins = [o.strip() for o in os.getenv('DASHBOARD_ORIGIN', '*').split(',') if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -61,13 +132,40 @@ app.add_middleware(
 
 db = Database(Config.DATABASE_PATH)
 db.sanitize_channels()
-auth = AuthManager(sessions_dir=os.path.abspath(os.path.join(os.path.dirname(__file__), "../../sessions")))
+auth = AuthManager(sessions_dir=SESSIONS_DIR)
 
 # Реестр активных воркеров
 workers: Dict[int, BotWorker] = {}
 
-# Флаг глобальной паузы (для вступления в каналы и т.п.)
+
+def _start_worker_for_account(account: dict) -> Optional[BotWorker]:
+    """Helper для старта воркера (используется и в автостарте, и в /start endpoint)"""
+    if account.get('ip'):
+        account['proxy'] = {
+            'ip': account['ip'],
+            'port': account['port'],
+            'proxy_user': account.get('proxy_user'),
+            'proxy_pass': account.get('proxy_pass'),
+            'proxy_type': account.get('proxy_type', 'http')
+        }
+    worker = BotWorker(account, db)
+    workers[account['id']] = worker
+    worker.start()
+    return worker
+
+
+# Флаг глобальной паузы (FIX: синхронизирован с worker'ом через worker_set_global_pause)
 global_pause = False
+
+
+def _set_global_pause(value: bool):
+    """Единая точка установки global_pause для main и worker."""
+    global global_pause
+    global_pause = bool(value)
+    try:
+        worker_set_global_pause(bool(value))
+    except Exception:
+        pass
 
 # Время запуска сервера для отслеживания новых каналов
 from datetime import datetime, timezone, timedelta
@@ -181,7 +279,7 @@ async def add_account(account: AccountCreate):
         
         # Если был использован прокси, привязываем его к аккаунту
         if proxy_id:
-            db.set_account_proxy(acc_id, proxy_id)
+            db.assign_proxy_to_account(acc_id, proxy_id)
         
         return {"status": "success", "id": acc_id}
     except Exception as e:
@@ -207,7 +305,7 @@ async def import_session(
     # Формируем имя сессии
     clean_phone = phone.replace('+', '').replace(' ', '')
     session_name = f"session_{clean_phone}"
-    sessions_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../sessions"))
+    sessions_dir = SESSIONS_DIR
     session_path = os.path.join(sessions_dir, f"{session_name}.session")
     
     # Создаём папку если нет
@@ -238,7 +336,7 @@ async def import_sessions_bulk(
 ):
     """Массовый импорт .session файлов"""
     results = []
-    sessions_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../sessions"))
+    sessions_dir = SESSIONS_DIR
     os.makedirs(sessions_dir, exist_ok=True)
     
     for file in files:
@@ -464,19 +562,8 @@ async def start_bot(acc_id: int):
     if acc_id in workers and workers[acc_id].is_running:
         return {"status": "already_running"}
     
-    # Формируем данные прокси в нужном формате для воркера
-    if account.get('ip'):
-        account['proxy'] = {
-            'ip': account['ip'],
-            'port': account['port'],
-            'proxy_user': account.get('proxy_user'),
-            'proxy_pass': account.get('proxy_pass'),
-            'proxy_type': account.get('proxy_type', 'http')
-        }
-    
-    worker = BotWorker(account, db)
-    workers[acc_id] = worker
-    worker.start()
+    _start_worker_for_account(account)
+    db.update_account_status(acc_id, 'active')
     return {"status": "started"}
 
 @app.post("/accounts/{acc_id}/stop")
@@ -484,6 +571,7 @@ async def stop_bot(acc_id: int):
     if acc_id in workers:
         workers[acc_id].stop()
         del workers[acc_id]
+        db.update_account_status(acc_id, 'stopped')
         return {"status": "stopped"}
     return {"status": "not_running"}
 
@@ -558,6 +646,15 @@ async def get_settings():
         "comment_channels_mode": db.get_setting("comment_channels_mode", "all"),
         "chat_message_interval_minutes": db.get_setting("chat_message_interval_minutes", 30),
         "chat_reply_chance": db.get_setting("chat_reply_chance", 0.03),  # Шанс ответить в чате (3%)
+        # === Новые тоглы поведения в чатах ===
+        "leave_if_no_write": db.get_setting("leave_if_no_write", True),       # Выход при ChatWriteForbidden
+        "auto_leave_junk": db.get_setting("auto_leave_junk", False),          # Авто-отписка от мусорных чатов через AI
+        "spambot_unblock": db.get_setting("spambot_unblock", True),           # Писать @SpamBot при PeerFloodError
+        # === Health watcher ===
+        "channel_watcher_enabled": db.get_setting("channel_watcher_enabled", True),
+        "channel_watcher_interval_minutes": db.get_setting("channel_watcher_interval_minutes", 30),
+        # === Глобальная пауза ===
+        "global_pause": global_pause,
     }
 
 class SettingsUpdate(BaseModel):
@@ -587,10 +684,23 @@ class SettingsUpdate(BaseModel):
     comment_channels_mode: Optional[str] = None  # all, public, private, joined
     chat_message_interval_minutes: Optional[int] = None  # Минимальный интервал между сообщениями в один чат
     chat_reply_chance: Optional[float] = None  # Шанс ответить в чате (0.0 - 1.0)
+    # === Новые тоглы поведения в чатах ===
+    leave_if_no_write: Optional[bool] = None
+    auto_leave_junk: Optional[bool] = None
+    spambot_unblock: Optional[bool] = None
+    # === Health watcher ===
+    channel_watcher_enabled: Optional[bool] = None
+    channel_watcher_interval_minutes: Optional[int] = None
+    # === Глобальная пауза (через единый сеттер) ===
+    global_pause: Optional[bool] = None
 
 @app.post("/settings")
 async def update_settings(settings: SettingsUpdate):
-    for key, value in settings.model_dump(exclude_none=True).items():
+    payload = settings.model_dump(exclude_none=True)
+    # Глобальная пауза — отдельной веткой, синхронизируем с воркерами
+    if 'global_pause' in payload:
+        _set_global_pause(payload.pop('global_pause'))
+    for key, value in payload.items():
         db.set_setting(key, value)
     return {"status": "success"}
 
@@ -1691,7 +1801,21 @@ async def get_stats_summary(account_id: int):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    """Расширенный health-check для мониторинга на хостинге."""
+    running_workers = sum(1 for w in workers.values() if w.is_running)
+    try:
+        accounts_count = len(db.get_accounts())
+    except Exception:
+        accounts_count = -1
+    return {
+        "status": "ok",
+        "workers_running": running_workers,
+        "workers_total": len(workers),
+        "accounts": accounts_count,
+        "global_pause": global_pause,
+        "watcher_running": bool(health_watcher and health_watcher.is_running),
+        "uptime_since": SERVER_STARTUP_TIME,
+    }
 
 @app.get("/stats/global")
 async def get_global_stats():
@@ -1872,3 +1996,37 @@ async def bulk_update_profiles(data: BulkProfileUpdate):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
+
+# === Web UI (отдаём frontend из /static) ===========================
+# Этот блок должен быть в самом конце, чтобы не перехватывать API-роуты.
+
+# /static/* — отдаём ассеты (CSS, JS, картинки)
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/")
+async def serve_index():
+    """Главная страница — однофайловый дашборд."""
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return JSONResponse({
+        "error": "Frontend не собран. Файл static/index.html не найден.",
+        "api_docs": "/docs",
+    }, status_code=404)
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    fav = os.path.join(STATIC_DIR, "favicon.svg")
+    if os.path.exists(fav):
+        return FileResponse(fav, media_type="image/svg+xml")
+    return JSONResponse({}, status_code=204)
+
+
+@app.get("/auth-status")
+async def auth_status():
+    """Сообщает фронту, нужна ли авторизация (для login-формы)."""
+    return {"auth_required": bool(DASHBOARD_TOKEN)}

@@ -1,0 +1,28 @@
+# Render.com blueprint — https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: neuro-core
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python host.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: PORT
+        value: "10000"
+      - key: AUTOSTART_WORKERS
+        value: "1"
+      - key: DASHBOARD_TOKEN
+        sync: false   # установить вручную в Render UI
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: Api_id
+        sync: false
+      - key: Api_hash
+        sync: false
+    healthCheckPath: /health
+    disk:
+      name: neuro-core-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

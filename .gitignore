@@ -1,0 +1,67 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.Python
+build/
+dist/
+*.manifest
+*.spec
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Virtual environments ===
+.venv/
+venv/
+env/
+ENV/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# === Telegram sessions (НЕ коммитить никогда!) ===
+sessions/*.session
+sessions/*.session-journal
+sessions/temp_*.session*
+
+# === Конфиги с секретами ===
+.env
+.env.*
+1.envv
+!1.envv.example
+
+# === База данных ===
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+backend/data/*.db
+backend/data/*.db-journal
+backend/data/*.db-wal
+backend/data/*.db-shm
+
+# === Backup-файлы ===
+*.backup
+data/*.txt.backup
+
+# === Frontend (build artifacts от старого Electron-проекта) ===
+node_modules/
+dashboard/frontend/dist/
+dashboard/frontend/.vite/
+
+# === Логи ===
+*.log
+logs/
+
+# === Электрон ===
+out/
+release/

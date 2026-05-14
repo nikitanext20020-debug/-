@@ -1,0 +1,25 @@
+# === Конфигурация бота (placeholder-значения) ===
+# Скопируйте в 1.envv и заполните своими ключами.
+
+# Telegram API (https://my.telegram.org/apps) — глобальный fallback.
+# Для каждого аккаунта api_id/api_hash хранятся отдельно в БД при импорте сессии.
+Api_id=
+Api_hash=
+
+# AI provider (RouterAI / Gemini-совместимый OpenAI API)
+GEMINI_API_KEY=
+GEMINI_MODEL=google/gemini-3-flash-preview
+GEMINI_BASE_URL=https://routerai.ru/api/v1
+
+# Bearer-token для защиты дашборда. Если пусто — дашборд открыт.
+DASHBOARD_TOKEN=
+
+# CORS allowed origins, через запятую. По умолчанию '*'.
+DASHBOARD_ORIGIN=*
+
+# Авто-старт воркеров со статусом active при запуске (1/0).
+AUTOSTART_WORKERS=1
+
+# Порт/хост (можно переопределить в host.py).
+PORT=8000
+HOST=0.0.0.0

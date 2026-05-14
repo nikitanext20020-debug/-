@@ -1,9 +1,24 @@
-telethon==1.28.5
-python-dotenv==1.0.0
-opencv-python>=4.8.0
-google-generativeai>=0.3.0
-fastapi==0.104.1
-uvicorn==0.24.0
-pydantic==2.5.2
+# === Web framework ===
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+pydantic==2.6.1
+python-multipart==0.0.9
+
+# === Telegram ===
+telethon==1.34.0
 PySocks==1.7.1
+
+# === HTTP клиент (used by AsyncHTTPClient + аватары) ===
+aiohttp==3.9.3
+requests==2.31.0
 aiofiles==23.2.1
+
+# === Конфигурация ===
+python-dotenv==1.0.1
+
+# === Изображения / видео (опционально, для Vision-комментариев) ===
+opencv-python>=4.8.0,<4.10.0
+
+# === Опционально: GenAI SDK от Google (если нужен прямой доступ к Gemini) ===
+# Оставляем закомментированным — RouterAI использует OpenAI-совместимый эндпойнт.
+# google-generativeai>=0.4.0
