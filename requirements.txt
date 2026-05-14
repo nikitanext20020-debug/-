@@ -1,0 +1,9 @@
+telethon==1.28.5
+python-dotenv==1.0.0
+opencv-python>=4.8.0
+google-generativeai>=0.3.0
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.2
+PySocks==1.7.1
+aiofiles==23.2.1
