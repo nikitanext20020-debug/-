@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <title>NEURO.CORE — Telegram Bot Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- LOGIN OVERLAY (показывается, если /auth-status вернул auth_required:true) -->
+<div id="login-overlay" class="login-overlay hidden">
+  <form id="login-form" class="login-card">
+    <div class="login-logo">⚡</div>
+    <h1>NEURO.CORE</h1>
+    <p class="muted">Введите токен для доступа к панели</p>
+    <input type="password" id="login-token" placeholder="DASHBOARD_TOKEN" autocomplete="off" required />
+    <button class="btn btn-primary" type="submit">Войти</button>
+    <div id="login-error" class="login-error"></div>
+  </form>
+</div>
+
+<!-- TOP BAR -->
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-glyph">⚡</span>
+    <span class="brand-name">NEURO<span class="brand-dot">.</span>CORE</span>
+  </div>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="accounts">Аккаунты</button>
+    <button class="tab" data-tab="behavior">Поведение в чатах</button>
+    <button class="tab" data-tab="channels">Каналы</button>
+    <button class="tab" data-tab="settings">Настройки</button>
+    <button class="tab" data-tab="logs">Логи</button>
+  </nav>
+
+  <div class="status-cluster">
+    <div class="status-pill" id="status-watcher" title="Channel Health Watcher">
+      <span class="dot"></span><span class="status-label">watcher</span>
+    </div>
+    <div class="status-pill" id="status-workers" title="Запущено воркеров">
+      <span class="dot"></span><span class="status-label">0/0</span>
+    </div>
+    <label class="pause-toggle" title="Глобальная пауза">
+      <input type="checkbox" id="global-pause-toggle" />
+      <span class="pause-text">PAUSE</span>
+    </label>
+  </div>
+</header>
+
+<main>
+
+  <!-- ============================== TAB: АККАУНТЫ ============================== -->
+  <section class="tab-pane active" id="tab-accounts">
+    <div class="page-header">
+      <h2>Аккаунты</h2>
+      <div class="page-actions">
+        <button class="btn btn-ghost" id="btn-refresh-accounts">Обновить</button>
+        <button class="btn btn-primary" id="btn-add-account">+ Добавить</button>
+      </div>
+    </div>
+    <div class="metrics-row">
+      <div class="metric"><span class="metric-label">Аккаунтов</span><span class="metric-value" id="m-accounts">—</span></div>
+      <div class="metric"><span class="metric-label">Запущено</span><span class="metric-value" id="m-running">—</span></div>
+      <div class="metric"><span class="metric-label">Каналов в базе</span><span class="metric-value" id="m-channels">—</span></div>
+      <div class="metric"><span class="metric-label">Глобальная пауза</span><span class="metric-value" id="m-pause">—</span></div>
+    </div>
+    <div id="accounts-grid" class="cards-grid">
+      <div class="empty">Загрузка…</div>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: ПОВЕДЕНИЕ ============================== -->
+  <section class="tab-pane" id="tab-behavior">
+    <div class="page-header">
+      <h2>Поведение в чатах</h2>
+      <div class="page-actions">
+        <span class="muted small" id="behavior-saved-hint"></span>
+      </div>
+    </div>
+
+    <div class="toggle-group">
+
+      <!-- 1 -->
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">
+            <span class="toggle-icon">🚪</span>
+            Покидать если нельзя писать
+          </div>
+          <div class="toggle-desc">
+            Выходить из группы обсуждений канала при ошибке
+            <code>ChatWriteForbiddenError</code> — чтобы не накапливать «мёртвые»
+            подписки.
+          </div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" data-setting="leave_if_no_write" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <!-- 2 -->
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">
+            <span class="toggle-icon">🧹</span>
+            Авто-отписка от мусорных чатов
+          </div>
+          <div class="toggle-desc">
+            AI анализирует название/описание/число участников каждого чата
+            и команду <code>LEAVE</code> отправляет на очевидный спам/скам/NSFW/казино.
+            Не более 3 чатов за один проход (раз в час).
+          </div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" data-setting="auto_leave_junk" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <!-- 3 -->
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">
+            <span class="toggle-icon">🤖</span>
+            Писать спамботу при флуде
+          </div>
+          <div class="toggle-desc">
+            При <code>PeerFloodError</code> бот идёт в <b>@SpamBot</b>, отправляет <code>/start</code>,
+            парсит ответ. Если активен спам-блок — статус аккаунта помечается как
+            <code>spamblock</code>, нажимаются кнопки снятия мягкого блока.
+          </div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" data-setting="spambot_unblock" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+    </div>
+
+    <h3 class="section-h3">Дополнительные тоглы</h3>
+    <div class="toggle-group">
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">Реакции на посты</div>
+          <div class="toggle-desc">Ставить реакции перед комментарием.</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-setting="react_to_posts"/><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">Лайкать чужие комментарии</div>
+          <div class="toggle-desc">Имитация активного участия в обсуждении.</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-setting="like_other_comments"/><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">Общение в чатах</div>
+          <div class="toggle-desc">Отвечать на сообщения в групповых чатах (не комменты).</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-setting="chat_interaction_enabled"/><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">Прогрев новых аккаунтов</div>
+          <div class="toggle-desc">Снижает активность для новых аккаунтов первые сутки.</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-setting="warmup_mode"/><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">Авто-ночной режим</div>
+          <div class="toggle-desc">Снижает активность ночью по часам аккаунта.</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-setting="auto_night_mode"/><span class="slider"></span></label>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: КАНАЛЫ ============================== -->
+  <section class="tab-pane" id="tab-channels">
+    <div class="page-header">
+      <h2>База каналов</h2>
+      <div class="page-actions">
+        <button class="btn btn-ghost" id="btn-refresh-channels">Обновить</button>
+        <button class="btn btn-ghost" id="btn-cleanup-channels">Очистить закрытые</button>
+      </div>
+    </div>
+
+    <div class="metrics-row">
+      <div class="metric"><span class="metric-label">Всего</span><span class="metric-value" id="ch-total">—</span></div>
+      <div class="metric"><span class="metric-label">С открытыми комментами</span><span class="metric-value" id="ch-open">—</span></div>
+      <div class="metric"><span class="metric-label">Watcher (мин)</span><span class="metric-value" id="ch-watcher-int">—</span></div>
+      <div class="metric"><span class="metric-label">Watcher</span><span class="metric-value" id="ch-watcher">—</span></div>
+    </div>
+
+    <div class="search-box">
+      <input type="search" id="channels-search" placeholder="Поиск по названию или @username…" />
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Канал</th>
+            <th>Название</th>
+            <th>Подписчиков</th>
+            <th>Комменты</th>
+            <th>Источник</th>
+            <th>Проверен</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="channels-tbody">
+          <tr><td colspan="7" class="empty">Загрузка…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: НАСТРОЙКИ ============================== -->
+  <section class="tab-pane" id="tab-settings">
+    <div class="page-header">
+      <h2>Настройки</h2>
+      <div class="page-actions">
+        <button class="btn btn-ghost" id="btn-test-ai">Тест нейросети</button>
+        <button class="btn btn-primary" id="btn-save-settings">Сохранить</button>
+      </div>
+    </div>
+
+    <div class="settings-grid">
+      <div class="form-row">
+        <label>AI API ключ (RouterAI / Gemini)</label>
+        <input type="password" data-setting="gemini_api_key" placeholder="sk-…" />
+      </div>
+      <div class="form-row">
+        <label>AI модель</label>
+        <input type="text" data-setting="gemini_model" placeholder="google/gemini-3-flash-preview" />
+      </div>
+
+      <div class="form-row">
+        <label>Системный промпт для комментариев</label>
+        <textarea rows="6" data-setting="comment_prompt"></textarea>
+      </div>
+
+      <div class="form-grid-2">
+        <div class="form-row">
+          <label>Макс. возраст поста (часы)</label>
+          <input type="number" min="1" max="240" data-setting="max_post_age_hours" />
+        </div>
+        <div class="form-row">
+          <label>Пауза между циклами (сек)</label>
+          <input type="number" min="10" max="3600" data-setting="cycle_pause_seconds" />
+        </div>
+        <div class="form-row">
+          <label>Поиск каналов: каждые N циклов</label>
+          <input type="number" min="1" max="200" data-setting="search_interval_cycles" />
+        </div>
+        <div class="form-row">
+          <label>Watcher: интервал (мин)</label>
+          <input type="number" min="5" max="1440" data-setting="channel_watcher_interval_minutes" />
+        </div>
+        <div class="form-row">
+          <label>Мин. подписчиков канала</label>
+          <input type="number" min="0" data-setting="min_channel_subs" />
+        </div>
+        <div class="form-row">
+          <label>Шанс ответить в чате (0..1)</label>
+          <input type="number" step="0.01" min="0" max="1" data-setting="chat_reply_chance" />
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label>Режим работы (powerful / neutral / chill)</label>
+        <select data-setting="work_mode">
+          <option value="powerful">powerful</option>
+          <option value="neutral">neutral</option>
+          <option value="chill">chill</option>
+        </select>
+      </div>
+
+      <div class="form-row">
+        <label>Какие каналы комментировать</label>
+        <select data-setting="comment_channels_mode">
+          <option value="all">Все</option>
+          <option value="public">Только публичные</option>
+          <option value="private">Только приватные</option>
+          <option value="joined">Только те, в которых вступили</option>
+        </select>
+      </div>
+
+      <div class="toggle-group" style="margin-top:24px">
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <div class="toggle-title">Channel Health Watcher</div>
+            <div class="toggle-desc">Фоновая валидация каналов в БД (см. интервал выше).</div>
+          </div>
+          <label class="switch"><input type="checkbox" data-setting="channel_watcher_enabled"/><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <div class="toggle-title">Поиск новых каналов</div>
+            <div class="toggle-desc">Включить автоматический поиск каналов по ключевым словам.</div>
+          </div>
+          <label class="switch"><input type="checkbox" data-setting="search_enabled"/><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div id="settings-test-result" class="form-row"></div>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: ЛОГИ ============================== -->
+  <section class="tab-pane" id="tab-logs">
+    <div class="page-header">
+      <h2>Логи</h2>
+      <div class="page-actions">
+        <select id="logs-level">
+          <option value="">Все уровни</option>
+          <option value="info">info</option>
+          <option value="warning">warning</option>
+          <option value="error">error</option>
+        </select>
+        <label class="checkbox-inline">
+          <input type="checkbox" id="logs-autorefresh" checked />
+          Автообновление
+        </label>
+        <button class="btn btn-ghost" id="btn-refresh-logs">Обновить</button>
+      </div>
+    </div>
+    <div id="logs-container" class="logs">Загрузка…</div>
+  </section>
+
+</main>
+
+<!-- TOAST -->
+<div id="toast" class="toast"></div>
+
+<!-- ADD ACCOUNT MODAL -->
+<div id="modal-add-account" class="modal hidden">
+  <div class="modal-card">
+    <header><h3>Добавить аккаунт</h3><button class="modal-close">×</button></header>
+    <div class="modal-body">
+      <p class="muted">Импортируйте готовый <code>.session</code> файл Telethon.</p>
+      <form id="form-import-session">
+        <div class="form-row"><label>Телефон (international, +XXXXX)</label>
+          <input type="tel" name="phone" required placeholder="+15551234567"/></div>
+        <div class="form-row"><label>API ID</label>
+          <input type="number" name="api_id" required placeholder="12345"/></div>
+        <div class="form-row"><label>API Hash</label>
+          <input type="text" name="api_hash" required minlength="32" maxlength="32" /></div>
+        <div class="form-row"><label>.session файл</label>
+          <input type="file" name="file" accept=".session" required /></div>
+        <div class="form-row"><button class="btn btn-primary" type="submit">Импортировать</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

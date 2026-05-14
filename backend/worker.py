@@ -2,7 +2,12 @@ from telethon import TelegramClient, events
 from telethon.tl.functions.messages import GetDiscussionMessageRequest, ImportChatInviteRequest, GetBotCallbackAnswerRequest
 from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.types import KeyboardButtonCallback
-from telethon.errors import MessageIdInvalidError, FloodWaitError, UserAlreadyParticipantError, InviteHashExpiredError, ChannelPrivateError, UserDeactivatedBanError, AuthKeyUnregisteredError, ChatWriteForbiddenError, SlowModeWaitError
+from telethon.errors import (
+    MessageIdInvalidError, FloodWaitError, UserAlreadyParticipantError,
+    InviteHashExpiredError, ChannelPrivateError, UserDeactivatedBanError,
+    AuthKeyUnregisteredError, ChatWriteForbiddenError, SlowModeWaitError,
+    PeerFloodError,
+)
 import socks
 import time
 import threading
@@ -24,6 +29,8 @@ from modules.autoresponder import AutoResponder
 from modules.keyword_search import KeywordSearch
 from modules.reactions import ReactionManager
 from modules.channel_joiner import ChannelJoiner
+from modules.junk_chat_classifier import JunkChatClassifier
+from modules.spambot_checker import SpamBotChecker
 from utils.logger import Logger, StructuredLogger
 from utils.async_http import close_http_client
 
@@ -100,6 +107,23 @@ class BotWorker:
         # Кэш настроек (60 секунд TTL)
         self._settings_cache: Dict[str, tuple] = {}  # key -> (value, timestamp)
         self._settings_cache_ttl = 60
+        
+        # === Новые компоненты для трёх тоглов ===
+        # Классификатор мусорных чатов (создаётся лениво в start()).
+        self.junk_classifier: Optional[JunkChatClassifier] = None
+        # Проверка @SpamBot (создаётся лениво).
+        self.spambot_checker: Optional[SpamBotChecker] = None
+        # Защита от слишком частых обращений к @SpamBot
+        self._last_spambot_check: float = 0.0
+        self._spambot_cooldown_seconds: int = 600  # 10 мин
+        # Трекинг счётчика PeerFloodError (для эскалации)
+        self._peer_flood_count: int = 0
+        # Кэш чатов, которые уже признали мусором — не проверяем повторно
+        self._junk_chat_decisions: Dict[int, bool] = {}
+        # Время последнего прохода _maybe_leave_junk_chats
+        self._last_junk_scan: float = 0.0
+        # Сколько чатов покинуть за один проход (анти-флуд)
+        self._junk_leave_per_scan = 3
         
     def _get_proxy(self):
         if not self.proxy_data or not self.proxy_data.get('ip'):
@@ -405,6 +429,15 @@ class BotWorker:
                 # Очистка кэшей памяти каждые 50 циклов (предотвращение утечек)
                 if cycle % 50 == 0:
                     self._cleanup_memory_caches()
+                
+                # === Тоггл "auto_leave_junk" ===
+                # Авто-отписка от мусорных чатов (раз в ~25 циклов).
+                if (cycle % 25 == 0
+                        and self._get_cached_setting("auto_leave_junk", False)):
+                    try:
+                        await self._maybe_leave_junk_chats()
+                    except Exception as e:
+                        self.log(f"⚠️ junk_chat scan error: {e}", "warning")
                 
                 cycle_pause = self._get_cached_setting("cycle_pause_seconds", 60)
                 await asyncio.sleep(cycle_pause)
@@ -841,6 +874,27 @@ class BotWorker:
                 if self.db.get_setting("like_other_comments", False):
                     await self._like_random_comments(channel, post.id)
 
+            except PeerFloodError as e:
+                # === Тоггл "spambot_unblock" ===
+                # Telegram временно ограничил исходящие — это анти-спам.
+                self._peer_flood_count += 1
+                self.log(
+                    f"🚨 PeerFloodError в {name}. Анти-спам Telegram. Счётчик: {self._peer_flood_count}",
+                    "warning",
+                )
+                self.db.mark_banned(self.account_id, name)
+                self.db.unlock_channel(name)
+                # Записываем в health-monitor (как FloodWait), чтобы воркер встал на паузу
+                try:
+                    self.health_monitor.record_flood_wait(self.account_id, 600)
+                except Exception:
+                    pass
+                # Если включён тоггл — идём в @SpamBot за статусом
+                if self._get_cached_setting("spambot_unblock", True):
+                    await self._consult_spambot(reason=f"PeerFloodError на {name}")
+                # Делаем большую паузу прежде чем продолжать
+                await asyncio.sleep(60)
+
             except FloodWaitError as e:
                 # Обработка FloodWait с буфером +10 секунд
                 wait_seconds = e.seconds + 10
@@ -880,6 +934,11 @@ class BotWorker:
                 self.db.mark_banned(self.account_id, name)
                 self.db.mark_post_processed(self.account_id, name, post.id)
                 self.db.unlock_channel(name)
+
+                # === Тоггл "leave_if_no_write" ===
+                # Если включён — выходим из дискуссионной группы
+                if self._get_cached_setting("leave_if_no_write", True):
+                    await self._safe_leave_discussion_group(channel, name)
                 
                 # Проверяем, все ли аккаунты забанены
                 ban_stats = self.db.get_ban_stats_for_channel(name)
@@ -2132,6 +2191,178 @@ class BotWorker:
         except Exception as e:
             pass  # Не критичная ошибка
 
+    # ==================================================================
+    # === Helpers для трёх тоглов поведения =============================
+    # ==================================================================
+
+    async def _safe_leave_discussion_group(self, channel, channel_name: str):
+        """
+        Покидает дискуссионную группу канала, в которой нет прав писать.
+        Используется при ChatWriteForbiddenError, если включён leave_if_no_write.
+        Не выходим из самого канала-источника, только из группы обсуждений.
+        """
+        try:
+            full = await self.client(GetFullChannelRequest(channel))
+            linked_chat_id = getattr(full.full_chat, "linked_chat_id", None)
+            if not linked_chat_id:
+                return
+            try:
+                linked = await self.client.get_entity(linked_chat_id)
+                await self.client(LeaveChannelRequest(linked))
+                self.log(f"🚪 Вышел из группы обсуждений {channel_name} (нет прав писать)")
+                # убираем из локального кэша вступленных
+                self._joined_discussion_groups.discard(linked_chat_id)
+            except Exception as e:
+                self.log(f"⚠️ Не удалось выйти из группы обсуждений {channel_name}: {e}", "warning")
+        except Exception as e:
+            # Не падаем — это второстепенное действие
+            self.log(f"⚠️ leave_discussion_group: {e}", "warning")
+
+    async def _consult_spambot(self, reason: str = ""):
+        """
+        Идёт в @SpamBot и проверяет статус аккаунта.
+        Используется при PeerFloodError, если включён spambot_unblock.
+        Применяется cooldown 10 минут, чтобы не спамить @SpamBot.
+        """
+        now = time.time()
+        if now - self._last_spambot_check < self._spambot_cooldown_seconds:
+            self.log("⏳ @SpamBot уже опрашивался недавно, пропускаю", "warning")
+            return
+        self._last_spambot_check = now
+
+        if self.spambot_checker is None:
+            self.spambot_checker = SpamBotChecker(self.client)
+
+        self.log(f"🤖 Иду в @SpamBot ({reason})...")
+        try:
+            res = await self.spambot_checker.check(press_buttons=True, wait_seconds=4.0)
+        except Exception as e:
+            self.log(f"⚠️ Ошибка @SpamBot: {e}", "warning")
+            return
+
+        # Логируем итог + обновляем статус аккаунта при необходимости
+        msg_short = res.message[:120] if res.message else ""
+        if res.status == "ok":
+            self.log(f"✅ @SpamBot: всё чисто. {msg_short}")
+        elif res.status == "unblocked":
+            self.log(f"✅ @SpamBot снял блок. {msg_short}")
+        elif res.status == "limited":
+            unblock = (res.will_unblock_at.isoformat()
+                       if res.will_unblock_at else "неизвестно")
+            self.log(
+                f"⚠️ @SpamBot: спам-блок активен (до {unblock}). {msg_short}",
+                "warning",
+            )
+            self._update_account_status("spamblock")
+        elif res.status == "blocked":
+            self.log(f"🚫 @SpamBot: аккаунт заблокирован. {msg_short}", "error")
+            self._update_account_status("spamblock")
+            # Снимаем с работы — нет смысла продолжать
+            self.is_running = False
+        else:
+            self.log(f"❓ @SpamBot: неопознанный статус. {msg_short}", "warning")
+
+    async def _maybe_leave_junk_chats(self):
+        """
+        Раз в N циклов проходит по диалогам, классифицирует их через
+        JunkChatClassifier и выходит из мусорных. Покидает не более
+        _junk_leave_per_scan чатов за один проход (анти-флуд Telegram).
+        """
+        # Минимум 1 час между сканами
+        now = time.time()
+        if now - self._last_junk_scan < 3600:
+            return
+        self._last_junk_scan = now
+
+        if self.junk_classifier is None:
+            self.junk_classifier = JunkChatClassifier(db=self.db)
+
+        # сбрасываем LLM-бюджет на этот проход
+        self.junk_classifier.reset_llm_budget(max_calls=10)
+
+        try:
+            dialogs = await self.client.get_dialogs(limit=200)
+        except Exception as e:
+            self.log(f"⚠️ Не удалось получить диалоги для junk-сканирования: {e}", "warning")
+            return
+
+        left_count = 0
+        checked_count = 0
+
+        for dialog in dialogs:
+            if not self.is_running:
+                break
+            if left_count >= self._junk_leave_per_scan:
+                break
+
+            # Только группы и мегагруппы (НЕ broadcast-каналы!)
+            entity = dialog.entity
+            is_group = (getattr(entity, "megagroup", False)
+                        or getattr(entity, "gigagroup", False)
+                        or hasattr(entity, "participants_count"))
+            if not is_group or getattr(entity, "broadcast", False):
+                continue
+            # Не трогаем личные диалоги
+            if dialog.is_user:
+                continue
+
+            chat_id = entity.id
+            # уже принимали решение — пропускаем
+            if chat_id in self._junk_chat_decisions:
+                continue
+
+            title = getattr(entity, "title", "") or ""
+            username = getattr(entity, "username", "") or ""
+            members = getattr(entity, "participants_count", 0) or 0
+            about = ""
+            try:
+                full = await self.client(GetFullChannelRequest(entity))
+                about = (getattr(full.full_chat, "about", "") or "")[:500]
+                # Если в full есть свежее число участников — уточняем
+                fresh_members = getattr(full.full_chat, "participants_count", None)
+                if fresh_members:
+                    members = fresh_members
+            except Exception:
+                # Если full не получили — классифицируем по тому что есть
+                pass
+
+            checked_count += 1
+
+            try:
+                verdict = await self.junk_classifier.classify(
+                    title=title, about=about, members_count=members, username=username,
+                )
+            except Exception as e:
+                self.log(f"⚠️ junk classify '{title}': {e}", "warning")
+                continue
+
+            self._junk_chat_decisions[chat_id] = verdict.is_junk
+
+            if verdict.is_junk and verdict.confidence >= 0.6:
+                try:
+                    await self.client(LeaveChannelRequest(entity))
+                    left_count += 1
+                    self.log(
+                        f"🗑️ Вышел из мусорного чата '{title}' "
+                        f"(reason: {verdict.reason}, conf: {verdict.confidence:.2f})"
+                    )
+                    # Анти-флуд: пауза между LeaveChannelRequest
+                    await asyncio.sleep(random.uniform(8.0, 15.0))
+                except FloodWaitError as fw:
+                    self.log(f"⏳ FloodWait при отписке: {fw.seconds}с — стопим скан", "warning")
+                    break
+                except Exception as e:
+                    self.log(f"⚠️ Не удалось выйти из '{title}': {e}", "warning")
+            # throttle между классификациями
+            await asyncio.sleep(0.5)
+
+        if checked_count > 0:
+            self.log(
+                f"🧹 junk-scan: проверено {checked_count}, покинуто {left_count}"
+            )
+
+    # ==================================================================
+
     def run_task(self, coro):
         """Запускает корутину в цикле воркера (thread-safe)"""
         if self.is_running and hasattr(self, 'loop') and self.loop:
@@ -2175,6 +2406,13 @@ class BotWorker:
             await close_http_client()
         except Exception as e:
             self.log(f"⚠️ Ошибка закрытия HTTP клиента: {e}", "warning")
+        
+        # Закрываем junk classifier (его собственный HTTP клиент)
+        if self.junk_classifier:
+            try:
+                await self.junk_classifier.close()
+            except Exception:
+                pass
         
         # Отключаем Telegram клиент
         if self.client:

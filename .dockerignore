@@ -1,0 +1,49 @@
+# === VCS ===
+.git
+.gitignore
+.gitattributes
+
+# === Python артефакты ===
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+
+# === IDE ===
+.idea
+.vscode
+*.swp
+.DS_Store
+
+# === Сессии и БД (должны монтироваться как volume на хосте) ===
+sessions/
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+backend/data/
+
+# === Старый Electron mess ===
+node_modules/
+electron/
+dashboard/
+package.json
+package-lock.json
+yarn.lock
+
+# === Конфиги с секретами ===
+1.envv
+.env*
+
+# === Документация / легаси ===
+*.md
+*.backup
+data/*.txt.backup
+
+# === CI ===
+.github/

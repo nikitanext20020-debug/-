@@ -50,15 +50,18 @@ class Config:
     GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://routerai.ru/api/v1")
     
     # Telegram API
-    API_ID = os.getenv('Api_id')
-    API_HASH = os.getenv('Api_hash')
+    API_ID = os.getenv('Api_id') or os.getenv('TELEGRAM_API_ID')
+    API_HASH = os.getenv('Api_hash') or os.getenv('TELEGRAM_API_HASH')
     
-    # Если нет ключей в .env, используем запасные (будут заменены после создания сессии)
-    if not API_ID or 'your api id' in str(API_ID):
-        API_ID = 6
-        API_HASH = '773215c9f5c3523d69adee020c726d5c'
-    else:
+    # API_ID/API_HASH задаются на уровне аккаунта в БД при импорте сессии,
+    # а на уровне конфига нужны только как глобальный fallback. Никаких
+    # хардкоднутых leaked-ключей TG Desktop здесь не оставляем.
+    if API_ID and str(API_ID).strip().isdigit():
         API_ID = int(API_ID)
+    else:
+        API_ID = None
+    if not API_HASH or str(API_HASH).strip() == '':
+        API_HASH = None
     
     # Telegram сессия
     SESSION_NAME = 'session_name'
