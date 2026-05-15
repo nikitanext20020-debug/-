@@ -346,6 +346,102 @@ class Database:
             if 'reply_to_id' not in columns:
                 cursor.execute("ALTER TABLE sent_comments ADD COLUMN reply_to_id INTEGER")
 
+            # Таблица собственных каналов (созданных аккаунтом)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS own_channels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    channel_id INTEGER,
+                    username TEXT,
+                    title TEXT,
+                    description TEXT,
+                    invite_link TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Таблица очереди постов
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS post_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    content_text TEXT,
+                    media_path TEXT,
+                    media_type TEXT,
+                    format_type TEXT DEFAULT 'md',
+                    scheduled_at TIMESTAMP,
+                    status TEXT DEFAULT 'pending',
+                    posted_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Таблица спарсенных пользователей для инвайтера
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS parsed_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    source_chat_id INTEGER,
+                    source_chat_title TEXT,
+                    parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(account_id, user_id)
+                )
+            ''')
+
+            # Таблица результатов инвайтов
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS invite_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    status TEXT,
+                    error_message TEXT,
+                    invited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Таблица кампаний массовой рассылки
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS mass_send_campaigns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    name TEXT,
+                    message_template TEXT NOT NULL,
+                    media_path TEXT,
+                    media_type TEXT,
+                    target_type TEXT DEFAULT 'dm',
+                    status TEXT DEFAULT 'active',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Таблица результатов массовой рассылки
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS mass_send_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    target_id TEXT NOT NULL,
+                    target_type TEXT,
+                    status TEXT,
+                    error_message TEXT,
+                    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Индексы для новых таблиц
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_own_channels_account ON own_channels(account_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_post_queue_status ON post_queue(status)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_parsed_users_account ON parsed_users(account_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_invite_stats_account ON invite_stats(account_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_mass_send_results_campaign ON mass_send_results(campaign_id)')
+
     # --- Найденные каналы ---
     def add_found_channel(self, channel: str, title: str, keyword: str = "", source: str = "search", 
                           subs: int = 0, views: int = 0, can_comment: bool = False, min_subs: int = 500) -> bool:
@@ -2011,3 +2107,192 @@ class Database:
             ''', (f'-{max_age_days}',))
             
             return cursor.rowcount
+
+    # --- Own Channels ---
+    def get_own_channels(self, account_id: int) -> List[Dict]:
+        """Возвращает список собственных каналов аккаунта"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM own_channels WHERE account_id = ?
+                ORDER BY created_at DESC
+            ''', (account_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def add_own_channel(self, account_id: int, channel_id: int, username: str, title: str,
+                        description: str = "", invite_link: str = "") -> int:
+        """Добавляет собственный канал аккаунта. Возвращает ID записи."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO own_channels (account_id, channel_id, username, title, description, invite_link)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (account_id, channel_id, username, title, description, invite_link))
+            return cursor.lastrowid
+
+    # --- Parsed Users (Inviter) ---
+    def add_parsed_user(self, account_id: int, user_id: int, username: str = None,
+                        first_name: str = None, last_name: str = None,
+                        source_chat_id: int = None, source_chat_title: str = None) -> bool:
+        """Добавляет спарсенного пользователя. Возвращает True если добавлен (новый)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('''
+                    INSERT INTO parsed_users (account_id, user_id, username, first_name, last_name, source_chat_id, source_chat_title)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (account_id, user_id, username, first_name, last_name, source_chat_id, source_chat_title))
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def get_parsed_users(self, account_id: int, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """Возвращает список спарсенных пользователей для аккаунта"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM parsed_users WHERE account_id = ?
+                ORDER BY parsed_at DESC
+                LIMIT ? OFFSET ?
+            ''', (account_id, limit, offset))
+            return [dict(row) for row in cursor.fetchall()]
+
+    # --- Invite Stats ---
+    def add_invite_result(self, account_id: int, channel_id: int, user_id: int,
+                          status: str, error_message: str = None):
+        """Добавляет результат инвайта"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO invite_stats (account_id, channel_id, user_id, status, error_message)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (account_id, channel_id, user_id, status, error_message))
+
+    def get_invite_stats(self, account_id: int) -> Dict:
+        """Возвращает статистику инвайтов для аккаунта: {total, success, errors, today_count}"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT COUNT(*) FROM invite_stats WHERE account_id = ?", (account_id,))
+            total = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM invite_stats WHERE account_id = ? AND status = 'success'", (account_id,))
+            success = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM invite_stats WHERE account_id = ? AND status = 'error'", (account_id,))
+            errors = cursor.fetchone()[0]
+
+            msk_tz = timezone(timedelta(hours=3))
+            today = datetime.now(msk_tz).strftime('%Y-%m-%d')
+            cursor.execute(
+                "SELECT COUNT(*) FROM invite_stats WHERE account_id = ? AND DATE(invited_at) = ?",
+                (account_id, today)
+            )
+            today_count = cursor.fetchone()[0]
+
+            return {
+                "total": total,
+                "success": success,
+                "errors": errors,
+                "today_count": today_count
+            }
+
+    # --- Post Queue ---
+    def add_post_to_queue(self, account_id: int, channel_id: int, content_text: str,
+                          media_path: str = None, media_type: str = None,
+                          format_type: str = "md", scheduled_at: str = None) -> int:
+        """Добавляет пост в очередь. Возвращает ID записи."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO post_queue (account_id, channel_id, content_text, media_path, media_type, format_type, scheduled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (account_id, channel_id, content_text, media_path, media_type, format_type, scheduled_at))
+            return cursor.lastrowid
+
+    def get_pending_posts(self, account_id: int) -> List[Dict]:
+        """Возвращает посты со статусом pending, у которых scheduled_at <= now или NULL"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM post_queue
+                WHERE account_id = ? AND status = 'pending'
+                AND (scheduled_at IS NULL OR scheduled_at <= datetime('now'))
+                ORDER BY scheduled_at ASC, created_at ASC
+            ''', (account_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def mark_post_sent(self, post_id: int):
+        """Помечает пост как отправленный"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE post_queue SET status = 'sent', posted_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (post_id,))
+
+    def mark_post_failed(self, post_id: int):
+        """Помечает пост как неудавшийся"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE post_queue SET status = 'failed'
+                WHERE id = ?
+            ''', (post_id,))
+
+    # --- Mass Send Campaigns ---
+    def add_mass_send_campaign(self, account_id: int, name: str, message_template: str,
+                               media_path: str = None, media_type: str = None,
+                               target_type: str = "dm") -> int:
+        """Создает кампанию массовой рассылки. Возвращает ID кампании."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO mass_send_campaigns (account_id, name, message_template, media_path, media_type, target_type)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (account_id, name, message_template, media_path, media_type, target_type))
+            return cursor.lastrowid
+
+    def get_mass_send_campaigns(self, account_id: int) -> List[Dict]:
+        """Возвращает список кампаний массовой рассылки для аккаунта"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM mass_send_campaigns WHERE account_id = ?
+                ORDER BY created_at DESC
+            ''', (account_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def add_mass_send_result(self, campaign_id: int, account_id: int, target_id: str,
+                             target_type: str, status: str, error_message: str = None):
+        """Добавляет результат отправки в кампании"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO mass_send_results (campaign_id, account_id, target_id, target_type, status, error_message)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (campaign_id, account_id, target_id, target_type, status, error_message))
+
+    def get_campaign_stats(self, campaign_id: int) -> Dict:
+        """Возвращает статистику кампании: {total, sent, blocked, errors}"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ?", (campaign_id,))
+            total = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'sent'", (campaign_id,))
+            sent = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'blocked'", (campaign_id,))
+            blocked = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'error'", (campaign_id,))
+            errors = cursor.fetchone()[0]
+
+            return {
+                "total": total,
+                "sent": sent,
+                "blocked": blocked,
+                "errors": errors
+            }
