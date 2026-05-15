@@ -2211,15 +2211,19 @@ class Database:
             return cursor.lastrowid
 
     def get_pending_posts(self, account_id: int) -> List[Dict]:
-        """Возвращает посты со статусом pending, у которых scheduled_at <= now или NULL"""
+        """Возвращает посты со статусом pending, у которых scheduled_at <= now (MSK) или NULL"""
+        from datetime import datetime, timezone, timedelta
+        msk_tz = timezone(timedelta(hours=3))
+        now_msk = datetime.now(msk_tz).strftime('%Y-%m-%d %H:%M:%S')
+
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT * FROM post_queue
                 WHERE account_id = ? AND status = 'pending'
-                AND (scheduled_at IS NULL OR scheduled_at <= datetime('now'))
+                AND (scheduled_at IS NULL OR scheduled_at <= ?)
                 ORDER BY scheduled_at ASC, created_at ASC
-            ''', (account_id,))
+            ''', (account_id, now_msk))
             return [dict(row) for row in cursor.fetchall()]
 
     def mark_post_sent(self, post_id: int):

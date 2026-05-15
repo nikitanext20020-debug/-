@@ -2464,6 +2464,20 @@ class BotWorker:
         if self.keyword_search:
             self.keyword_search.stop()
         
+        # Cleanup new module HTTP clients
+        if self.channel_creator:
+            try:
+                if hasattr(self, 'loop') and self.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(self.channel_creator.close(), self.loop).result(timeout=5)
+            except Exception:
+                pass
+        if self.channel_poster:
+            try:
+                if hasattr(self, 'loop') and self.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(self.channel_poster.close(), self.loop).result(timeout=5)
+            except Exception:
+                pass
+        
         if self.client:
             try:
                 # Пытаемся отключиться корректно через сохраненный loop

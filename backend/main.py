@@ -2162,9 +2162,24 @@ async def get_post_queue(acc_id: int, channel_id: int):
 @app.post("/accounts/{acc_id}/channel/{channel_id}/queue")
 async def add_to_post_queue(acc_id: int, channel_id: int, data: PostQueueRequest):
     """Добавляет пост в очередь"""
+    media_path = None
+    if data.media_base64:
+        import base64 as b64
+        import uuid
+        media_dir = os.path.join(ROOT_DIR, 'data', 'media')
+        os.makedirs(media_dir, exist_ok=True)
+        header_end = data.media_base64.find(',')
+        b64_data = data.media_base64[header_end+1:] if header_end != -1 else data.media_base64
+        media_bytes = b64.b64decode(b64_data)
+        ext = '.jpg' if data.media_type == 'photo' else '.mp4' if data.media_type == 'video' else '.bin'
+        filename = f"{uuid.uuid4().hex}{ext}"
+        media_path = os.path.join(media_dir, filename)
+        with open(media_path, 'wb') as f:
+            f.write(media_bytes)
+
     post_id = db.add_post_to_queue(
         acc_id, channel_id, data.text,
-        media_path=None, media_type=data.media_type,
+        media_path=media_path, media_type=data.media_type,
         format_type=data.format_type, scheduled_at=data.scheduled_at
     )
     return {"status": "success", "post_id": post_id}
@@ -2232,8 +2247,7 @@ async def start_invite(acc_id: int, data: InviteStartRequest):
         
         future = worker.run_task(_invite())
         if future:
-            result = future.result(timeout=600)  # 10 min for invite session
-            return {"status": "success", "stats": result}
+            return {"status": "started", "message": "Invite session started. Poll /inviter/stats for progress."}
         raise HTTPException(status_code=500, detail="Воркер недоступен")
     except HTTPException:
         raise
@@ -2286,16 +2300,29 @@ async def start_dm_campaign(acc_id: int, data: MassSendDMRequest):
             data.message_template, target_type="dm"
         )
         
+        media_path = None
+        if data.media_base64:
+            import base64 as b64
+            import uuid
+            media_dir = os.path.join(ROOT_DIR, 'data', 'media')
+            os.makedirs(media_dir, exist_ok=True)
+            header_end = data.media_base64.find(',')
+            b64_data = data.media_base64[header_end+1:] if header_end != -1 else data.media_base64
+            media_bytes = b64.b64decode(b64_data)
+            filename = f"{uuid.uuid4().hex}.bin"
+            media_path = os.path.join(media_dir, filename)
+            with open(media_path, 'wb') as f:
+                f.write(media_bytes)
+        
         async def _send():
             return await worker.mass_sender.run_dm_campaign(
                 campaign_id, data.user_ids, data.message_template,
-                hourly_limit=data.hourly_limit
+                media_path=media_path, hourly_limit=data.hourly_limit
             )
         
         future = worker.run_task(_send())
         if future:
-            result = future.result(timeout=1800)  # 30 min max
-            return {"status": "success", "campaign_id": campaign_id, "stats": result}
+            return {"status": "started", "campaign_id": campaign_id}
         raise HTTPException(status_code=500, detail="Воркер недоступен")
     except HTTPException:
         raise
@@ -2317,16 +2344,29 @@ async def start_group_campaign(acc_id: int, data: MassSendGroupRequest):
             data.message_template, target_type="group"
         )
         
+        media_path = None
+        if data.media_base64:
+            import base64 as b64
+            import uuid
+            media_dir = os.path.join(ROOT_DIR, 'data', 'media')
+            os.makedirs(media_dir, exist_ok=True)
+            header_end = data.media_base64.find(',')
+            b64_data = data.media_base64[header_end+1:] if header_end != -1 else data.media_base64
+            media_bytes = b64.b64decode(b64_data)
+            filename = f"{uuid.uuid4().hex}.bin"
+            media_path = os.path.join(media_dir, filename)
+            with open(media_path, 'wb') as f:
+                f.write(media_bytes)
+        
         async def _send():
             return await worker.mass_sender.run_group_campaign(
                 campaign_id, data.chat_ids, data.message_template,
-                hourly_limit=data.hourly_limit
+                media_path=media_path, hourly_limit=data.hourly_limit
             )
         
         future = worker.run_task(_send())
         if future:
-            result = future.result(timeout=1800)  # 30 min max
-            return {"status": "success", "campaign_id": campaign_id, "stats": result}
+            return {"status": "started", "campaign_id": campaign_id}
         raise HTTPException(status_code=500, detail="Воркер недоступен")
     except HTTPException:
         raise
