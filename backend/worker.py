@@ -35,6 +35,7 @@ from modules.channel_creator import ChannelCreator
 from modules.channel_poster import ChannelPoster
 from modules.inviter import Inviter
 from modules.mass_sender import MassSender
+from modules.channel_filter import ChannelFilter
 from utils.logger import Logger, StructuredLogger
 from utils.async_http import close_http_client
 
@@ -134,6 +135,7 @@ class BotWorker:
         self.channel_poster = None
         self.inviter = None
         self.mass_sender = None
+        self.channel_filter = None
         
     def _get_proxy(self):
         if not self.proxy_data or not self.proxy_data.get('ip'):
@@ -375,6 +377,7 @@ class BotWorker:
             self.channel_poster = ChannelPoster(self.client, self.db, self.account_id)
             self.inviter = Inviter(self.client, self.db, self.account_id)
             self.mass_sender = MassSender(self.client, self.db, self.account_id)
+            self.channel_filter = ChannelFilter(self.client, self.db, self.account_id)
             
             # Вступаем в каналы из channels_to_join.txt при запуске
             self.loop.run_until_complete(self._join_pending_channels())

@@ -2399,6 +2399,158 @@ async def get_campaign_stats_api(acc_id: int, campaign_id: int):
     return db.get_campaign_stats(campaign_id)
 
 
+# === Channel Filter API ===
+
+class FilterCriteria(BaseModel):
+    min_subscribers: int = 1000
+    min_avg_views: int = 300
+    max_days_since_last_post: int = 7
+    require_open_comments: bool = True
+    junk_filter: bool = True
+    min_posts_per_week: int = 2
+
+class FilterRequest(BaseModel):
+    channels: Optional[List[str]] = None
+    criteria: Optional[FilterCriteria] = None
+
+@app.post("/api/channels/filter/start")
+async def start_channel_filter(request: FilterRequest):
+    """Запускает массовую фильтрацию каналов. Неблокирующий - возвращает сразу, прогресс по /progress."""
+    running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running and w.channel_filter]
+    if not running_workers:
+        raise HTTPException(status_code=400, detail="Нет запущенных аккаунтов с модулем фильтрации")
+
+    acc_id, worker = running_workers[0]
+    criteria_dict = request.criteria.model_dump() if request.criteria else None
+
+    if request.channels:
+        # Фильтруем указанный список каналов
+        channels = [Config.normalize_channel(ch) for ch in request.channels if ch.strip()]
+        channels = [ch for ch in channels if ch]
+        total = len(channels)
+
+        async def _run():
+            return await worker.channel_filter.bulk_filter(channels, criteria_dict)
+
+        future = worker.run_task(_run())
+        if not future:
+            raise HTTPException(status_code=500, detail="Воркер недоступен")
+        return {"status": "started", "total": total}
+    else:
+        # Фильтруем всю БД
+        db_channels = db.get_found_channels(limit=5000, only_open_comments=False)
+        total = len(db_channels)
+
+        async def _run_db():
+            return await worker.channel_filter.filter_existing_db(criteria_dict)
+
+        future = worker.run_task(_run_db())
+        if not future:
+            raise HTTPException(status_code=500, detail="Воркер недоступен")
+        return {"status": "started", "total": total}
+
+
+@app.post("/api/channels/filter/import")
+async def import_and_filter_channels(file: UploadFile = File(...), criteria: str = Form("{}")):
+    """Загружает файл со списком каналов и фильтрует. Формат: одна строка = один канал."""
+    import json as json_mod
+
+    running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running and w.channel_filter]
+    if not running_workers:
+        raise HTTPException(status_code=400, detail="Нет запущенных аккаунтов с модулем фильтрации")
+
+    acc_id, worker = running_workers[0]
+
+    # Читаем файл
+    content = await file.read()
+    text_content = content.decode('utf-8', errors='ignore')
+
+    # Парсим критерии
+    try:
+        criteria_dict = json_mod.loads(criteria) if criteria and criteria.strip() != '{}' else None
+    except (json_mod.JSONDecodeError, ValueError):
+        criteria_dict = None
+
+    # Подсчитываем количество каналов для ответа
+    lines = [l.strip() for l in text_content.strip().splitlines() if l.strip() and not l.strip().startswith('#')]
+    total = len(lines)
+
+    async def _run_import():
+        return await worker.channel_filter.import_and_filter(text_content, criteria_dict)
+
+    future = worker.run_task(_run_import())
+    if not future:
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    return {"status": "started", "total": total}
+
+
+@app.get("/api/channels/filter/progress")
+async def get_filter_progress():
+    """Возвращает прогресс текущей фильтрации."""
+    running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running and w.channel_filter]
+    if not running_workers:
+        return {"running": False, "processed": 0, "total": 0, "passed": 0, "rejected": 0, "errors": 0}
+
+    _, worker = running_workers[0]
+    return worker.channel_filter._progress
+
+
+@app.get("/api/channels/filter/results")
+async def get_filter_results():
+    """Возвращает результаты последней фильтрации."""
+    running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running and w.channel_filter]
+    if not running_workers:
+        return {"total": 0, "passed": 0, "rejected": 0, "errors": 0, "results": []}
+
+    _, worker = running_workers[0]
+    results = worker.channel_filter.get_results()
+    passed = sum(1 for r in results if r['status'] == 'passed')
+    rejected = sum(1 for r in results if r['status'] == 'rejected')
+    errors = sum(1 for r in results if r['status'] == 'error')
+    return {
+        "total": len(results),
+        "passed": passed,
+        "rejected": rejected,
+        "errors": errors,
+        "results": results,
+    }
+
+
+@app.post("/api/channels/filter/apply")
+async def apply_filter_results():
+    """Применяет результаты фильтрации - удаляет rejected каналы из БД."""
+    running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running and w.channel_filter]
+    if not running_workers:
+        raise HTTPException(status_code=400, detail="Нет запущенных аккаунтов с модулем фильтрации")
+
+    _, worker = running_workers[0]
+
+    async def _apply():
+        return await worker.channel_filter.apply_results(remove_rejected=True)
+
+    future = worker.run_task(_apply())
+    if not future:
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+
+    try:
+        result = future.result(timeout=30)
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/channels/filter/stop")
+async def stop_channel_filter():
+    """Останавливает текущую фильтрацию."""
+    running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running and w.channel_filter]
+    if not running_workers:
+        return {"status": "not_running"}
+
+    _, worker = running_workers[0]
+    worker.channel_filter.stop()
+    return {"status": "stopped"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
