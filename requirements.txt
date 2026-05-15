@@ -17,8 +17,4 @@ aiofiles==23.2.1
 python-dotenv==1.0.1
 
 # === Изображения / видео (опционально, для Vision-комментариев) ===
-opencv-python>=4.8.0,<4.10.0
-
-# === Опционально: GenAI SDK от Google (если нужен прямой доступ к Gemini) ===
-# Оставляем закомментированным — RouterAI использует OpenAI-совместимый эндпойнт.
-# google-generativeai>=0.4.0
+opencv-python-headless>=4.8.0,<4.11.0
