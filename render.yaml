@@ -4,7 +4,7 @@ services:
     name: neuro-core
     runtime: python
     plan: starter
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python host.py
     envVars:
       - key: PYTHON_VERSION
@@ -21,6 +21,8 @@ services:
         sync: false
       - key: Api_hash
         sync: false
+      - key: SESSIONS_DIR
+        value: "/opt/render/project/src/data/sessions"
     healthCheckPath: /health
     disk:
       name: neuro-core-data

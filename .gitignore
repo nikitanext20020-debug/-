@@ -32,6 +32,7 @@ Thumbs.db
 sessions/*.session
 sessions/*.session-journal
 sessions/temp_*.session*
+data/sessions/
 
 # === Конфиги с секретами ===
 .env
