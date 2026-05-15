@@ -1993,6 +1993,399 @@ async def bulk_update_profiles(data: BulkProfileUpdate):
     }
 
 
+# === Models for new modules ===
+class ChannelCreateRequest(BaseModel):
+    title: str
+    about: str = ""
+    username_base: str
+    topic: str
+    avatar_base64: Optional[str] = None
+
+class ChannelPostRequest(BaseModel):
+    text: str
+    media_base64: Optional[str] = None
+    media_type: Optional[str] = None
+    format_type: str = "md"
+
+class GeneratePostRequest(BaseModel):
+    topic: str
+
+class PostQueueRequest(BaseModel):
+    text: str
+    scheduled_at: Optional[str] = None
+    media_base64: Optional[str] = None
+    media_type: Optional[str] = None
+    format_type: str = "md"
+
+class InviteParseRequest(BaseModel):
+    chat_id: str
+
+class InviteStartRequest(BaseModel):
+    channel_id: int
+    source_chat_id: Optional[str] = None
+    user_ids: Optional[List[int]] = None
+    daily_limit: Optional[int] = None
+
+class MassSendDMRequest(BaseModel):
+    user_ids: List
+    message_template: str
+    media_base64: Optional[str] = None
+    hourly_limit: Optional[int] = None
+
+class MassSendGroupRequest(BaseModel):
+    chat_ids: List
+    message_template: str
+    media_base64: Optional[str] = None
+    hourly_limit: Optional[int] = None
+
+
+# === Channel Creator API ===
+
+@app.post("/accounts/{acc_id}/channel/create")
+async def create_channel(acc_id: int, data: ChannelCreateRequest):
+    """Создает новый канал для аккаунта"""
+    if acc_id not in workers or not workers[acc_id].is_running:
+        raise HTTPException(status_code=400, detail="Аккаунт не запущен")
+    
+    worker = workers[acc_id]
+    
+    try:
+        avatar_bytes = None
+        if data.avatar_base64:
+            import base64 as b64
+            header_end = data.avatar_base64.find(',')
+            b64_data = data.avatar_base64[header_end+1:] if header_end != -1 else data.avatar_base64
+            avatar_bytes = b64.b64decode(b64_data)
+        
+        async def _create():
+            return await worker.channel_creator.create_and_setup_channel(
+                title=data.title,
+                about=data.about,
+                username_base=data.username_base,
+                topic=data.topic,
+                avatar_bytes=avatar_bytes
+            )
+        
+        future = worker.run_task(_create())
+        if future:
+            result = future.result(timeout=300)  # 5 min timeout for warmup posts
+            if result:
+                return {"status": "success", **result}
+            raise HTTPException(status_code=500, detail="Не удалось создать канал")
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/accounts/{acc_id}/channels")
+async def get_own_channels(acc_id: int):
+    """Получает список собственных каналов аккаунта"""
+    return db.get_own_channels(acc_id)
+
+
+# === Channel Poster API ===
+
+@app.post("/accounts/{acc_id}/channel/{channel_id}/post")
+async def post_to_channel(acc_id: int, channel_id: int, data: ChannelPostRequest):
+    """Публикует пост в канал"""
+    if acc_id not in workers or not workers[acc_id].is_running:
+        raise HTTPException(status_code=400, detail="Аккаунт не запущен")
+    
+    worker = workers[acc_id]
+    
+    try:
+        media_bytes = None
+        if data.media_base64:
+            import base64 as b64
+            header_end = data.media_base64.find(',')
+            b64_data = data.media_base64[header_end+1:] if header_end != -1 else data.media_base64
+            media_bytes = b64.b64decode(b64_data)
+        
+        async def _post():
+            if media_bytes:
+                return await worker.channel_poster.post_message_with_bytes(
+                    channel_id, data.text, media_bytes, data.media_type, data.format_type
+                )
+            else:
+                return await worker.channel_poster.post_message(
+                    channel_id, data.text, format_type=data.format_type
+                )
+        
+        future = worker.run_task(_post())
+        if future:
+            result = future.result(timeout=60)
+            if result:
+                return {"status": "success", "message_id": result.id}
+            raise HTTPException(status_code=500, detail="Не удалось отправить пост")
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/accounts/{acc_id}/channel/{channel_id}/generate-post")
+async def generate_post(acc_id: int, channel_id: int, data: GeneratePostRequest):
+    """Генерирует пост через AI и публикует"""
+    if acc_id not in workers or not workers[acc_id].is_running:
+        raise HTTPException(status_code=400, detail="Аккаунт не запущен")
+    
+    worker = workers[acc_id]
+    
+    try:
+        async def _gen():
+            return await worker.channel_poster.generate_and_post(channel_id, data.topic)
+        
+        future = worker.run_task(_gen())
+        if future:
+            result = future.result(timeout=60)
+            if result:
+                return {"status": "success", "message_id": result.id, "text": result.text}
+            raise HTTPException(status_code=500, detail="Не удалось сгенерировать пост")
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/accounts/{acc_id}/channel/{channel_id}/queue")
+async def get_post_queue(acc_id: int, channel_id: int):
+    """Получает очередь постов для канала"""
+    posts = db.get_pending_posts(acc_id)
+    # Filter by channel_id
+    return [p for p in posts if p.get('channel_id') == channel_id]
+
+
+@app.post("/accounts/{acc_id}/channel/{channel_id}/queue")
+async def add_to_post_queue(acc_id: int, channel_id: int, data: PostQueueRequest):
+    """Добавляет пост в очередь"""
+    media_path = None
+    if data.media_base64:
+        import base64 as b64
+        import uuid
+        media_dir = os.path.join(ROOT_DIR, 'data', 'media')
+        os.makedirs(media_dir, exist_ok=True)
+        header_end = data.media_base64.find(',')
+        b64_data = data.media_base64[header_end+1:] if header_end != -1 else data.media_base64
+        media_bytes = b64.b64decode(b64_data)
+        ext = '.jpg' if data.media_type == 'photo' else '.mp4' if data.media_type == 'video' else '.bin'
+        filename = f"{uuid.uuid4().hex}{ext}"
+        media_path = os.path.join(media_dir, filename)
+        with open(media_path, 'wb') as f:
+            f.write(media_bytes)
+
+    post_id = db.add_post_to_queue(
+        acc_id, channel_id, data.text,
+        media_path=media_path, media_type=data.media_type,
+        format_type=data.format_type, scheduled_at=data.scheduled_at
+    )
+    return {"status": "success", "post_id": post_id}
+
+
+# === Inviter API ===
+
+@app.post("/accounts/{acc_id}/inviter/parse")
+async def parse_users(acc_id: int, data: InviteParseRequest):
+    """Парсит пользователей из чата"""
+    if acc_id not in workers or not workers[acc_id].is_running:
+        raise HTTPException(status_code=400, detail="Аккаунт не запущен")
+    
+    worker = workers[acc_id]
+    
+    try:
+        async def _parse():
+            return await worker.inviter.parse_users_from_chat(data.chat_id)
+        
+        future = worker.run_task(_parse())
+        if future:
+            count = future.result(timeout=60)
+            return {"status": "success", "parsed_count": count}
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/accounts/{acc_id}/inviter/users")
+async def get_parsed_users_api(acc_id: int, limit: int = 100, offset: int = 0):
+    """Получает список спарсенных пользователей"""
+    return db.get_parsed_users(acc_id, limit=limit, offset=offset)
+
+
+@app.post("/accounts/{acc_id}/inviter/start")
+async def start_invite(acc_id: int, data: InviteStartRequest):
+    """Запускает инвайтинг"""
+    if acc_id not in workers or not workers[acc_id].is_running:
+        raise HTTPException(status_code=400, detail="Аккаунт не запущен")
+    
+    worker = workers[acc_id]
+    
+    try:
+        async def _invite():
+            if data.source_chat_id:
+                return await worker.inviter.run_invite_session(
+                    data.channel_id, data.source_chat_id,
+                    limit=data.daily_limit or 50
+                )
+            elif data.user_ids:
+                return await worker.inviter.invite_users_to_channel(
+                    data.channel_id, data.user_ids,
+                    daily_limit=data.daily_limit
+                )
+            else:
+                # Use already parsed users
+                users = db.get_parsed_users(acc_id, limit=data.daily_limit or 50)
+                user_ids = [u['user_id'] for u in users]
+                return await worker.inviter.invite_users_to_channel(
+                    data.channel_id, user_ids,
+                    daily_limit=data.daily_limit
+                )
+        
+        future = worker.run_task(_invite())
+        if future:
+            return {"status": "started", "message": "Invite session started. Poll /inviter/stats for progress."}
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/accounts/{acc_id}/inviter/stats")
+async def get_invite_stats_api(acc_id: int):
+    """Получает статистику инвайтинга"""
+    return db.get_invite_stats(acc_id)
+
+
+@app.get("/accounts/{acc_id}/inviter/chats")
+async def get_available_chats(acc_id: int):
+    """Получает список доступных чатов для парсинга"""
+    if acc_id not in workers or not workers[acc_id].is_running:
+        raise HTTPException(status_code=400, detail="Аккаунт не запущен")
+    
+    worker = workers[acc_id]
+    
+    try:
+        async def _chats():
+            return await worker.inviter.get_available_chats()
+        
+        future = worker.run_task(_chats())
+        if future:
+            return future.result(timeout=30)
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# === Mass Send API ===
+
+@app.post("/accounts/{acc_id}/mass-send/dm")
+async def start_dm_campaign(acc_id: int, data: MassSendDMRequest):
+    """Запускает рассылку в ЛС"""
+    if acc_id not in workers or not workers[acc_id].is_running:
+        raise HTTPException(status_code=400, detail="Аккаунт не запущен")
+    
+    worker = workers[acc_id]
+    
+    try:
+        # Create campaign in DB
+        campaign_id = db.add_mass_send_campaign(
+            acc_id, f"DM Campaign {asyncio.get_event_loop().time():.0f}",
+            data.message_template, target_type="dm"
+        )
+        
+        media_path = None
+        if data.media_base64:
+            import base64 as b64
+            import uuid
+            media_dir = os.path.join(ROOT_DIR, 'data', 'media')
+            os.makedirs(media_dir, exist_ok=True)
+            header_end = data.media_base64.find(',')
+            b64_data = data.media_base64[header_end+1:] if header_end != -1 else data.media_base64
+            media_bytes = b64.b64decode(b64_data)
+            filename = f"{uuid.uuid4().hex}.bin"
+            media_path = os.path.join(media_dir, filename)
+            with open(media_path, 'wb') as f:
+                f.write(media_bytes)
+        
+        async def _send():
+            return await worker.mass_sender.run_dm_campaign(
+                campaign_id, data.user_ids, data.message_template,
+                media_path=media_path, hourly_limit=data.hourly_limit
+            )
+        
+        future = worker.run_task(_send())
+        if future:
+            return {"status": "started", "campaign_id": campaign_id}
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/accounts/{acc_id}/mass-send/groups")
+async def start_group_campaign(acc_id: int, data: MassSendGroupRequest):
+    """Запускает рассылку в группы"""
+    if acc_id not in workers or not workers[acc_id].is_running:
+        raise HTTPException(status_code=400, detail="Аккаунт не запущен")
+    
+    worker = workers[acc_id]
+    
+    try:
+        campaign_id = db.add_mass_send_campaign(
+            acc_id, f"Group Campaign {asyncio.get_event_loop().time():.0f}",
+            data.message_template, target_type="group"
+        )
+        
+        media_path = None
+        if data.media_base64:
+            import base64 as b64
+            import uuid
+            media_dir = os.path.join(ROOT_DIR, 'data', 'media')
+            os.makedirs(media_dir, exist_ok=True)
+            header_end = data.media_base64.find(',')
+            b64_data = data.media_base64[header_end+1:] if header_end != -1 else data.media_base64
+            media_bytes = b64.b64decode(b64_data)
+            filename = f"{uuid.uuid4().hex}.bin"
+            media_path = os.path.join(media_dir, filename)
+            with open(media_path, 'wb') as f:
+                f.write(media_bytes)
+        
+        async def _send():
+            return await worker.mass_sender.run_group_campaign(
+                campaign_id, data.chat_ids, data.message_template,
+                media_path=media_path, hourly_limit=data.hourly_limit
+            )
+        
+        future = worker.run_task(_send())
+        if future:
+            return {"status": "started", "campaign_id": campaign_id}
+        raise HTTPException(status_code=500, detail="Воркер недоступен")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/accounts/{acc_id}/mass-send/campaigns")
+async def get_campaigns(acc_id: int):
+    """Получает список кампаний рассылки"""
+    return db.get_mass_send_campaigns(acc_id)
+
+
+@app.get("/accounts/{acc_id}/mass-send/campaigns/{campaign_id}/stats")
+async def get_campaign_stats_api(acc_id: int, campaign_id: int):
+    """Получает статистику кампании"""
+    return db.get_campaign_stats(campaign_id)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)

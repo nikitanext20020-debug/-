@@ -170,6 +170,20 @@ class Config:
         "chill": 0.3
     }
 
+    # Inviter settings
+    INVITER_DAILY_LIMIT = 40
+    INVITER_DELAY_MIN = 30
+    INVITER_DELAY_MAX = 120
+
+    # Mass sender settings
+    MASS_SEND_HOURLY_LIMIT = 20
+    MASS_SEND_DELAY_MIN = 60
+    MASS_SEND_DELAY_MAX = 180
+    MASS_SEND_ERROR_THRESHOLD = 5
+
+    # Channel creator settings
+    CHANNEL_WARMUP_POSTS_COUNT = 5
+
     # Файлы конфигурации
     CHANNELS_TO_JOIN_FILE = 'data/channels_to_join.txt'
     KEYWORDS_FILE = 'data/keywords.txt'
