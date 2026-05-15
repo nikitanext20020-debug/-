@@ -42,7 +42,20 @@ from modules.channel_health_watcher import ChannelHealthWatcher
 # Корни проекта
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 STATIC_DIR = os.path.join(ROOT_DIR, 'static')
-SESSIONS_DIR = os.path.join(ROOT_DIR, 'sessions')
+
+# Определяем директорию сессий: SESSIONS_DIR env > data/sessions/ > sessions/ (legacy)
+_sessions_dir_env = os.environ.get('SESSIONS_DIR')
+if _sessions_dir_env:
+    SESSIONS_DIR = _sessions_dir_env
+else:
+    _data_sessions = os.path.join(ROOT_DIR, 'data', 'sessions')
+    _legacy_sessions = os.path.join(ROOT_DIR, 'sessions')
+    if os.path.exists(_data_sessions) or not (os.path.exists(_legacy_sessions) and os.listdir(_legacy_sessions)):
+        SESSIONS_DIR = _data_sessions
+    else:
+        SESSIONS_DIR = _legacy_sessions
+
+os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 # Холдер для глобального health-watcher
 health_watcher: Optional[ChannelHealthWatcher] = None

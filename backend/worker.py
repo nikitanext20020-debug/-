@@ -268,7 +268,20 @@ class BotWorker:
             else:
                 self.log("🌐 Подключение без прокси (прямое соединение)")
             
-            session_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../sessions", self.session_name))
+            # Определяем директорию сессий: SESSIONS_DIR env > data/sessions/ > sessions/ (legacy)
+            sessions_dir = os.environ.get('SESSIONS_DIR')
+            if not sessions_dir:
+                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+                data_sessions = os.path.join(project_root, "data", "sessions")
+                legacy_sessions = os.path.join(project_root, "sessions")
+                
+                if os.path.exists(data_sessions) or not (os.path.exists(legacy_sessions) and os.listdir(legacy_sessions)):
+                    sessions_dir = data_sessions
+                else:
+                    sessions_dir = legacy_sessions
+            
+            os.makedirs(sessions_dir, exist_ok=True)
+            session_path = os.path.join(sessions_dir, self.session_name)
             self.client = TelegramClient(session_path, self.api_id, self.api_hash, proxy=proxy)
             
             # Подключаемся (проверяем, возвращается ли корутина)

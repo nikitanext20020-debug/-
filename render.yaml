@@ -21,6 +21,8 @@ services:
         sync: false
       - key: Api_hash
         sync: false
+      - key: SESSIONS_DIR
+        value: "/opt/render/project/src/data/sessions"
     healthCheckPath: /health
     disk:
       name: neuro-core-data
