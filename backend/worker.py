@@ -31,6 +31,11 @@ from modules.reactions import ReactionManager
 from modules.channel_joiner import ChannelJoiner
 from modules.junk_chat_classifier import JunkChatClassifier
 from modules.spambot_checker import SpamBotChecker
+from modules.channel_creator import ChannelCreator
+from modules.channel_poster import ChannelPoster
+from modules.inviter import Inviter
+from modules.mass_sender import MassSender
+from modules.channel_filter import ChannelFilter
 from utils.logger import Logger, StructuredLogger
 from utils.async_http import close_http_client
 
@@ -124,6 +129,13 @@ class BotWorker:
         self._last_junk_scan: float = 0.0
         # Сколько чатов покинуть за один проход (анти-флуд)
         self._junk_leave_per_scan = 3
+        
+        # Новые модули
+        self.channel_creator = None
+        self.channel_poster = None
+        self.inviter = None
+        self.mass_sender = None
+        self.channel_filter = None
         
     def _get_proxy(self):
         if not self.proxy_data or not self.proxy_data.get('ip'):
@@ -258,7 +270,20 @@ class BotWorker:
             else:
                 self.log("🌐 Подключение без прокси (прямое соединение)")
             
-            session_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../sessions", self.session_name))
+            # Определяем директорию сессий: SESSIONS_DIR env > data/sessions/ > sessions/ (legacy)
+            sessions_dir = os.environ.get('SESSIONS_DIR')
+            if not sessions_dir:
+                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+                data_sessions = os.path.join(project_root, "data", "sessions")
+                legacy_sessions = os.path.join(project_root, "sessions")
+                
+                if os.path.exists(data_sessions) or not (os.path.exists(legacy_sessions) and os.listdir(legacy_sessions)):
+                    sessions_dir = data_sessions
+                else:
+                    sessions_dir = legacy_sessions
+            
+            os.makedirs(sessions_dir, exist_ok=True)
+            session_path = os.path.join(sessions_dir, self.session_name)
             self.client = TelegramClient(session_path, self.api_id, self.api_hash, proxy=proxy)
             
             # Подключаемся (проверяем, возвращается ли корутина)
@@ -347,6 +372,13 @@ class BotWorker:
             self.reaction_manager = ReactionManager(self.client, self.db, self.account_id)
             self.channel_joiner = ChannelJoiner(self.client, db=self.db)
             
+            # Инициализация новых модулей
+            self.channel_creator = ChannelCreator(self.client, self.db, self.account_id)
+            self.channel_poster = ChannelPoster(self.client, self.db, self.account_id)
+            self.inviter = Inviter(self.client, self.db, self.account_id)
+            self.mass_sender = MassSender(self.client, self.db, self.account_id)
+            self.channel_filter = ChannelFilter(self.client, self.db, self.account_id)
+            
             # Вступаем в каналы из channels_to_join.txt при запуске
             self.loop.run_until_complete(self._join_pending_channels())
             
@@ -429,6 +461,13 @@ class BotWorker:
                 # Очистка кэшей памяти каждые 50 циклов (предотвращение утечек)
                 if cycle % 50 == 0:
                     self._cleanup_memory_caches()
+                
+                # Обработка очереди постов каждые 5 циклов
+                if cycle % 5 == 0 and self.channel_poster:
+                    try:
+                        await self.channel_poster.process_queue()
+                    except Exception as e:
+                        self.log(f"Ошибка обработки очереди постов: {e}", "warning")
                 
                 # === Тоггл "auto_leave_junk" ===
                 # Авто-отписка от мусорных чатов (раз в ~25 циклов).
@@ -2440,6 +2479,20 @@ class BotWorker:
         # Останавливаем keyword_search если запущен
         if self.keyword_search:
             self.keyword_search.stop()
+        
+        # Cleanup new module HTTP clients
+        if self.channel_creator:
+            try:
+                if hasattr(self, 'loop') and self.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(self.channel_creator.close(), self.loop).result(timeout=5)
+            except Exception:
+                pass
+        if self.channel_poster:
+            try:
+                if hasattr(self, 'loop') and self.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(self.channel_poster.close(), self.loop).result(timeout=5)
+            except Exception:
+                pass
         
         if self.client:
             try:

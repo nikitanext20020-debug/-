@@ -170,6 +170,30 @@ class Config:
         "chill": 0.3
     }
 
+    # Inviter settings
+    INVITER_DAILY_LIMIT = 40
+    INVITER_DELAY_MIN = 30
+    INVITER_DELAY_MAX = 120
+
+    # Mass sender settings
+    MASS_SEND_HOURLY_LIMIT = 20
+    MASS_SEND_DELAY_MIN = 60
+    MASS_SEND_DELAY_MAX = 180
+    MASS_SEND_ERROR_THRESHOLD = 5
+
+    # Channel creator settings
+    CHANNEL_WARMUP_POSTS_COUNT = 5
+
+    # Channel filter settings (bulk filtering)
+    FILTER_MIN_SUBSCRIBERS = 1000
+    FILTER_MIN_AVG_VIEWS = 300
+    FILTER_MAX_DAYS_SINCE_POST = 7
+    FILTER_REQUIRE_OPEN_COMMENTS = True
+    FILTER_MIN_POSTS_PER_WEEK = 2
+    FILTER_BATCH_DELAY_MIN = 2
+    FILTER_BATCH_DELAY_MAX = 4
+    FILTER_BATCH_SIZE = 10
+
     # Файлы конфигурации
     CHANNELS_TO_JOIN_FILE = 'data/channels_to_join.txt'
     KEYWORDS_FILE = 'data/keywords.txt'

@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Каталоги, которые должны существовать
-RUN mkdir -p data sessions
+RUN mkdir -p data data/sessions data/media sessions
 
 # Не кэшируем .pyc, не буферизуем stdout
 ENV PYTHONDONTWRITEBYTECODE=1 \
