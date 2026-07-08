@@ -359,7 +359,8 @@ def _resolve_api_credentials(api_id: Optional[int], api_hash: Optional[str]):
 
 @app.post("/import-session")
 async def import_session(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    files: Optional[List[UploadFile]] = File(None),
     phone: Optional[str] = Form(None),
     api_id: Optional[int] = Form(None),
     api_hash: Optional[str] = Form(None)
@@ -370,7 +371,14 @@ async def import_session(
       - phone берётся из имени файла, если не указан;
       - api_id / api_hash берутся из глобального конфига (1.envv), если не указаны.
     Так для готовой сессии достаточно просто загрузить файл.
+    Принимает как поле `file`, так и `files` (совместимость со старым фронтендом).
     """
+    # Совместимость: старый клиент мог отправлять поле `files`
+    if file is None and files:
+        file = files[0]
+    if file is None:
+        raise HTTPException(status_code=400, detail="Не передан .session файл")
+
     # Валидация
     if not file.filename.endswith('.session'):
         raise HTTPException(status_code=400, detail="Файл должен быть .session")
@@ -696,7 +704,7 @@ async def assign_proxy(acc_id: int, data: ProxyAssign):
     accounts = db.get_accounts()
     account = next((a for a in accounts if a['id'] == acc_id), None)
     if not account:
-        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+        raise HTTPException(status_code=404, detail="Аккаунт н�� найден")
     
     # Проверяем существование прокси если указан
     if data.proxy_id is not None:
@@ -1334,7 +1342,7 @@ async def comment_now(channel: str):
     При бане автоматически пробует другой аккаунт."""
     import random
     
-    # Находим запущенный аккаунт который не забанен в этом канале
+    # Находим запущенный аккаунт который не забанен в этом кан��ле
     normalized = channel.lstrip('@')
     
     running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running]
@@ -1652,7 +1660,7 @@ async def edit_comment(comment_id: int, data: CommentEdit):
     """Редактирует комментарий в Telegram и обновляет в БД"""
     comment = db.get_comment_by_id(comment_id)
     if not comment:
-        raise HTTPException(status_code=404, detail="Комментарий не найден")
+        raise HTTPException(status_code=404, detail="Комме��тарий не найден")
     
     # Проверяем наличие message_id
     if not comment.get('message_id'):
