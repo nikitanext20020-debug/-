@@ -692,6 +692,44 @@ input:disabled + .slider { opacity: 0.5; cursor: not-allowed; }
 .api-details[open] > summary::before { content: "▾ "; }
 .api-details > summary:hover { color: var(--text); }
 
+/* ============== PROFILE MODAL ============== */
+.profile-head { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.profile-avatar {
+  position: relative; width: 72px; height: 72px; flex: 0 0 auto;
+  border-radius: 50%; cursor: pointer; overflow: hidden;
+  border: 2px solid var(--line);
+}
+.profile-avatar img { width: 100%; height: 100%; object-fit: cover; display: none; }
+.profile-avatar-fallback {
+  width: 100%; height: 100%; display: grid; place-items: center;
+  font-size: 28px; font-weight: 600; color: #04140f;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+.profile-avatar-edit {
+  position: absolute; inset: auto 0 0 0; height: 40%;
+  display: flex; align-items: flex-end; justify-content: center; padding-bottom: 5px;
+  background: linear-gradient(180deg, transparent, rgba(0,0,0,0.65));
+  color: #fff; opacity: 0; transition: opacity 0.15s ease;
+}
+.profile-avatar:hover .profile-avatar-edit { opacity: 1; }
+.profile-avatar-edit svg { width: 16px; height: 16px; }
+.profile-id { display: flex; flex-direction: column; gap: 6px; }
+.profile-status-badge {
+  display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
+  font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 3px 9px; border-radius: 999px;
+  background: var(--bg-2); border: 1px solid var(--line-soft); color: var(--text-dim);
+}
+.profile-status-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.profile-status-badge.running { color: var(--good); border-color: rgba(41,217,138,0.3); }
+.profile-actions { margin-top: 6px; }
+.modal-body textarea {
+  width: 100%; resize: vertical; font: inherit;
+  background: var(--bg-0); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius-xs); padding: 9px 11px;
+}
+.modal-body textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+
 /* ============== LOGIN ============== */
 .login-overlay {
   position: fixed; inset: 0;

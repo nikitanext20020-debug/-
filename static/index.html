@@ -416,6 +416,45 @@
   </div>
 </div>
 
+<!-- EDIT PROFILE MODAL -->
+<div id="modal-profile" class="modal hidden">
+  <div class="modal-card">
+    <header><h3>Профиль аккаунта</h3><button class="modal-close">×</button></header>
+    <div class="modal-body">
+      <div id="profile-loading" class="muted">Загрузка профиля…</div>
+      <form id="form-profile" class="hidden">
+        <div class="profile-head">
+          <label class="profile-avatar" title="Сменить аватарку">
+            <img id="profile-avatar-img" alt="Аватарка аккаунта" />
+            <span id="profile-avatar-fallback" class="profile-avatar-fallback"></span>
+            <span class="profile-avatar-edit" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            </span>
+            <input type="file" id="profile-avatar-input" accept="image/*" hidden />
+          </label>
+          <div class="profile-id">
+            <div id="profile-phone" class="account-phone">—</div>
+            <div id="profile-status" class="profile-status-badge">—</div>
+          </div>
+        </div>
+
+        <div class="form-row"><label>Имя</label>
+          <input type="text" name="first_name" maxlength="64" placeholder="Имя"/></div>
+        <div class="form-row"><label>Фамилия</label>
+          <input type="text" name="last_name" maxlength="64" placeholder="Фамилия"/></div>
+        <div class="form-row"><label>Username</label>
+          <input type="text" name="username" maxlength="32" placeholder="без @"/></div>
+        <div class="form-row"><label>Описание (bio, до 70 символов)</label>
+          <textarea name="bio" maxlength="70" rows="2" placeholder="О себе"></textarea></div>
+
+        <div class="form-row profile-actions">
+          <button class="btn btn-primary" type="submit">Сохранить в Telegram</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

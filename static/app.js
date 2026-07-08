@@ -174,6 +174,7 @@ const Accounts = {
           ${a.is_running
             ? `<button class="btn btn-ghost btn-sm" data-act="stop"   data-id="${a.id}">Стоп</button>`
             : `<button class="btn btn-primary btn-sm" data-act="start" data-id="${a.id}">Старт</button>`}
+          <button class="btn btn-ghost btn-sm" data-act="profile" data-id="${a.id}">Профиль</button>
           <button class="btn btn-ghost btn-sm" data-act="reset-bans" data-id="${a.id}">Сбросить баны</button>
           <button class="btn btn-danger btn-sm" data-act="delete"    data-id="${a.id}">Удалить</button>
         </div>
@@ -194,6 +195,14 @@ const Accounts = {
       } else if (act === 'reset-bans') {
         await API.post(`/accounts/${id}/reset-bans`);
         toast('Баны сброшены', 'ok');
+      } else if (act === 'profile') {
+        const acc = this.data.find(x => x.id === id);
+        if (!acc || !acc.is_running) {
+          toast('Запустите аккаунт, чтобы редактировать профиль', 'error');
+          return;
+        }
+        Profile.open(id, acc);
+        return;
       }
       this.refresh();
     } catch (e) {
@@ -203,13 +212,105 @@ const Accounts = {
 };
 document.getElementById('btn-refresh-accounts').addEventListener('click', () => Accounts.refresh());
 
+// ============ PROFILE EDITING ============
+const Profile = {
+  id: null,
+  newAvatar: null, // base64 data URL, если пользователь выбрал новую
+  modal: document.getElementById('modal-profile'),
+  form: document.getElementById('form-profile'),
+  loading: document.getElementById('profile-loading'),
+
+  async open(id, acc) {
+    this.id = id;
+    this.newAvatar = null;
+    this.form.classList.add('hidden');
+    this.loading.classList.remove('hidden');
+    this.loading.textContent = 'Загрузка профиля…';
+    this.modal.classList.remove('hidden');
+
+    // Базовые данные из карточки
+    document.getElementById('profile-phone').textContent = acc.phone || '—';
+    const badge = document.getElementById('profile-status');
+    badge.textContent = 'активен';
+    badge.className = 'profile-status-badge running';
+
+    try {
+      const p = await API.get(`/accounts/${id}/profile`);
+      this.form.first_name.value = p.first_name || '';
+      this.form.last_name.value = p.last_name || '';
+      this.form.username.value = p.username || '';
+      this.form.bio.value = p.bio || '';
+      if (p.phone) document.getElementById('profile-phone').textContent = '+' + String(p.phone).replace(/^\+/, '');
+      this.setAvatar(p.avatar, p.first_name || p.username || '?');
+      this.form.classList.remove('hidden');
+      this.loading.classList.add('hidden');
+    } catch (e) {
+      this.loading.textContent = 'Не удалось получить профиль: ' + e.message;
+    }
+  },
+
+  setAvatar(src, nameForFallback) {
+    const img = document.getElementById('profile-avatar-img');
+    const fb = document.getElementById('profile-avatar-fallback');
+    if (src) {
+      img.src = src;
+      img.style.display = 'block';
+      fb.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      fb.style.display = 'grid';
+      fb.textContent = (nameForFallback || '?').trim().charAt(0).toUpperCase() || '?';
+    }
+  },
+
+  close() { this.modal.classList.add('hidden'); },
+
+  async save(e) {
+    e.preventDefault();
+    const payload = {
+      first_name: this.form.first_name.value.trim(),
+      last_name: this.form.last_name.value.trim(),
+      username: this.form.username.value.trim().replace(/^@/, ''),
+      bio: this.form.bio.value.trim(),
+    };
+    if (this.newAvatar) payload.avatar_base64 = this.newAvatar;
+    const btn = this.form.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    btn.textContent = 'Сохранение…';
+    try {
+      await API.put(`/accounts/${this.id}/profile`, payload);
+      toast('Профиль обновлён в Telegram', 'ok');
+      this.close();
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Сохранить в Telegram';
+    }
+  },
+};
+Profile.modal.querySelector('.modal-close').addEventListener('click', () => Profile.close());
+Profile.modal.addEventListener('click', (e) => { if (e.target === Profile.modal) Profile.close(); });
+Profile.form.addEventListener('submit', (e) => Profile.save(e));
+document.getElementById('profile-avatar-input').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { toast('Файл больше 5 МБ', 'error'); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    Profile.newAvatar = reader.result;
+    Profile.setAvatar(reader.result, '');
+  };
+  reader.readAsDataURL(file);
+});
+
 // Add account modal
 const modal = document.getElementById('modal-add-account');
 document.getElementById('btn-add-account').addEventListener('click', () => modal.classList.remove('hidden'));
 modal.querySelector('.modal-close').addEventListener('click', () => modal.classList.add('hidden'));
 modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
 
-// Если API ID/Hash заданы глобально в 1.envv — прячем ручные поля, показываем подсказку
+// Если API ID/Hash заданы глоба��ьно в 1.envv — прячем ручные поля, показываем подсказку
 (async () => {
   try {
     const cfg = await API.get('/config-status');
