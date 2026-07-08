@@ -119,12 +119,14 @@ document.querySelectorAll('.tab').forEach(btn => {
     if (btn.dataset.tab === 'channels') Channels.refresh();
     if (btn.dataset.tab === 'logs') Logs.refresh();
     if (btn.dataset.tab === 'accounts') Accounts.refresh();
+    if (btn.dataset.tab === 'proxies') Proxies.refresh();
   });
 });
 
 // ============ ACCOUNTS ============
 const Accounts = {
   data: [],
+  proxies: [],
   async refresh() {
     const grid = document.getElementById('accounts-grid');
     try {
@@ -133,6 +135,7 @@ const Accounts = {
       grid.innerHTML = `<div class="empty">Ошибка: ${escape(e.message)}</div>`;
       return;
     }
+    try { this.proxies = await API.get('/proxies'); } catch { this.proxies = []; }
     document.getElementById('m-accounts').textContent = this.data.length;
     document.getElementById('m-running').textContent =
       this.data.filter(a => a.is_running).length;
@@ -145,6 +148,27 @@ const Accounts = {
     grid.querySelectorAll('[data-act]').forEach(b => {
       b.addEventListener('click', () => this.action(b.dataset.act, +b.dataset.id));
     });
+    grid.querySelectorAll('[data-proxy-for]').forEach(sel => {
+      sel.addEventListener('change', () => this.assignProxy(+sel.dataset.proxyFor, sel.value));
+    });
+  },
+  proxyOptions(currentId) {
+    const opts = ['<option value="">Без прокси</option>'];
+    for (const p of this.proxies) {
+      const sel = String(p.id) === String(currentId) ? ' selected' : '';
+      const label = `${(p.type || 'http').toUpperCase()} ${p.ip}:${p.port}`;
+      opts.push(`<option value="${p.id}"${sel}>${escape(label)}</option>`);
+    }
+    return opts.join('');
+  },
+  async assignProxy(accId, proxyId) {
+    try {
+      await API.post(`/accounts/${accId}/proxy`, { proxy_id: proxyId ? Number(proxyId) : null });
+      toast(proxyId ? 'Прокси привязан' : 'Прокси отвязан', 'ok');
+    } catch (e) {
+      toast(e.message, 'error');
+      this.refresh();
+    }
   },
   renderCard(a) {
     const status = a.is_running ? 'running' : (a.status || 'stopped');
@@ -169,6 +193,10 @@ const Accounts = {
         </div>
         <div class="account-meta">
           <span>Health</span><span>${escape(a.health_status || '—')}</span>
+        </div>
+        <div class="account-proxy">
+          <span class="muted">Прокси</span>
+          <select data-proxy-for="${a.id}">${this.proxyOptions(a.proxy_id)}</select>
         </div>
         <div class="account-actions">
           ${a.is_running
@@ -467,7 +495,11 @@ const Channels = {
         <td>${c.can_comment ? '<span class="pill good">открыты</span>' : '<span class="pill bad">закрыты</span>'}</td>
         <td class="muted small">${escape(c.source || '—')}</td>
         <td class="muted small">${escape((c.last_checked || '').slice(0, 16))}</td>
-        <td><button class="btn btn-ghost btn-sm" data-del="${escape(c.channel)}">×</button></td>
+        <td>
+          <button class="btn btn-ghost btn-sm" data-recheck="${escape(c.channel)}" title="Перепроверить">↻</button>
+          <button class="btn btn-ghost btn-sm" data-comment="${escape(c.channel)}" title="Комментить сейчас">✎</button>
+          <button class="btn btn-ghost btn-sm" data-del="${escape(c.channel)}" title="Удалить">×</button>
+        </td>
       </tr>
     `).join('');
     tbody.querySelectorAll('[data-del]').forEach(b => {
@@ -477,6 +509,28 @@ const Channels = {
           await API.del(`/discovery/channels/${encodeURIComponent(b.dataset.del)}`);
           this.refresh();
         } catch (e) { toast(e.message, 'error'); }
+      });
+    });
+    tbody.querySelectorAll('[data-recheck]').forEach(b => {
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        try {
+          const r = await API.post(`/discovery/channels/${encodeURIComponent(b.dataset.recheck)}/recheck`);
+          toast((r && r.message) || 'Перепроверено', 'ok');
+          this.refresh();
+        } catch (e) { toast(e.message, 'error'); }
+        finally { b.disabled = false; }
+      });
+    });
+    tbody.querySelectorAll('[data-comment]').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm(`Оставить комментарий в @${b.dataset.comment} сейчас?`)) return;
+        b.disabled = true;
+        try {
+          const r = await API.post(`/discovery/channels/${encodeURIComponent(b.dataset.comment)}/comment-now`);
+          toast((r && r.message) || 'Отправлено', 'ok');
+        } catch (e) { toast(e.message, 'error'); }
+        finally { b.disabled = false; }
       });
     });
   },
@@ -491,6 +545,125 @@ document.getElementById('btn-cleanup-channels').addEventListener('click', async 
   } catch (e) { toast(e.message, 'error'); }
 });
 document.getElementById('channels-search').addEventListener('input', () => Channels.render());
+
+// Ручное добавление канала
+document.getElementById('form-add-channel').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('add-channel-input');
+  const titleEl = document.getElementById('add-channel-title');
+  const channel = (input.value || '').trim();
+  if (!channel) { toast('Укажите канал', 'error'); return; }
+  try {
+    await API.post('/discovery/channels/add', { channel, title: (titleEl.value || '').trim() });
+    toast('Канал добавлен', 'ok');
+    input.value = ''; titleEl.value = '';
+    Channels.refresh();
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+// Обслуживание базы каналов
+function bindChannelMaintenance(btnId, path, confirmMsg) {
+  const el = document.getElementById(btnId);
+  if (!el) return;
+  el.addEventListener('click', async () => {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    el.disabled = true;
+    const label = el.textContent;
+    el.textContent = 'Выполняю…';
+    try {
+      const r = await API.post(path);
+      toast((r && r.message) || 'Готово', 'ok');
+      Channels.refresh();
+    } catch (e) { toast(e.message, 'error'); }
+    finally { el.disabled = false; el.textContent = label; }
+  });
+}
+bindChannelMaintenance('btn-recheck-closed', '/discovery/channels/recheck-all-closed', 'Перепроверить все каналы с закрытыми комментариями? Может занять время.');
+bindChannelMaintenance('btn-join-private', '/discovery/channels/join-private', 'Отправить заявки на вступление во все приватные каналы?');
+bindChannelMaintenance('btn-reset-closed', '/discovery/channels/reset-closed', 'Сбросить статус «закрытые» у каналов?');
+
+// ============ PROXIES ============
+const Proxies = {
+  data: [],
+  async refresh() {
+    const tbody = document.getElementById('proxies-tbody');
+    try {
+      this.data = await API.get('/proxies');
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Ошибка: ${escape(e.message)}</td></tr>`;
+      return;
+    }
+    // считаем, сколько аккаунтов привязано к каждому прокси
+    let usage = {};
+    try {
+      const accs = Accounts.data.length ? Accounts.data : await API.get('/accounts');
+      for (const a of accs) if (a.proxy_id) usage[a.proxy_id] = (usage[a.proxy_id] || 0) + 1;
+    } catch { /* необязательно */ }
+
+    if (!this.data.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Нет прокси. Добавьте прокси через форму выше.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = this.data.map(p => `
+      <tr>
+        <td><span class="pill">${escape((p.type || 'http').toUpperCase())}</span></td>
+        <td class="mono">${escape(p.ip)}:${escape(String(p.port))}</td>
+        <td class="muted small">${escape(p.username || '—')}</td>
+        <td class="muted">${usage[p.id] || 0}</td>
+        <td><button class="btn btn-danger btn-sm" data-del-proxy="${p.id}">Удалить</button></td>
+      </tr>
+    `).join('');
+    tbody.querySelectorAll('[data-del-proxy]').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm('Удалить прокси? Он будет отвязан от всех аккаунтов.')) return;
+        try {
+          await API.del(`/proxies/${b.dataset.delProxy}`);
+          toast('Прокси удалён', 'ok');
+          this.refresh();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    });
+  },
+  readForm() {
+    const f = document.getElementById('form-add-proxy');
+    const port = Number(f.port.value);
+    return {
+      type: f.type.value,
+      ip: (f.ip.value || '').trim(),
+      port: Number.isFinite(port) ? port : 0,
+      username: (f.username.value || '').trim() || null,
+      password: (f.password.value || '').trim() || null,
+    };
+  },
+};
+document.getElementById('btn-refresh-proxies').addEventListener('click', () => Proxies.refresh());
+
+document.getElementById('form-add-proxy').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = Proxies.readForm();
+  if (!body.ip || !body.port) { toast('Укажите IP и порт', 'error'); return; }
+  try {
+    await API.post('/proxies', body);
+    toast('Прокси добавлен', 'ok');
+    e.target.reset();
+    Proxies.refresh();
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+document.getElementById('btn-check-proxy').addEventListener('click', async () => {
+  const out = document.getElementById('proxy-check-result');
+  const body = Proxies.readForm();
+  if (!body.ip || !body.port) { toast('Укажите IP и порт', 'error'); return; }
+  out.innerHTML = '<span class="muted">Проверяю…</span>';
+  try {
+    const r = await API.post('/proxies/check', body);
+    out.innerHTML = r.status === 'ok'
+      ? `<span class="pill good">${escape(r.message)}</span>`
+      : `<span class="pill bad">${escape(r.message)}</span>`;
+  } catch (e) {
+    out.innerHTML = `<span class="pill bad">Ошибка: ${escape(e.message)}</span>`;
+  }
+});
 
 // ============ LOGS ============
 const Logs = {

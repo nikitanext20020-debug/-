@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=2" />
+  <link rel="stylesheet" href="/static/style.css?v=3" />
 </head>
 <body>
 
@@ -44,6 +44,7 @@
     <button class="tab active" data-tab="accounts">Аккаунты</button>
     <button class="tab" data-tab="behavior">Поведение в чатах</button>
     <button class="tab" data-tab="channels">Каналы</button>
+    <button class="tab" data-tab="proxies">Прокси</button>
     <button class="tab" data-tab="settings">Настройки</button>
     <button class="tab" data-tab="logs">Логи</button>
   </nav>
@@ -206,6 +207,9 @@
       <h2>База каналов</h2>
       <div class="page-actions">
         <button class="btn btn-ghost" id="btn-refresh-channels">Обновить</button>
+        <button class="btn btn-ghost" id="btn-recheck-closed">Перепроверить закрытые</button>
+        <button class="btn btn-ghost" id="btn-join-private">Вступить в приватные</button>
+        <button class="btn btn-ghost" id="btn-reset-closed">Сбросить закрытые</button>
         <button class="btn btn-ghost" id="btn-cleanup-channels">Очистить закрытые</button>
       </div>
     </div>
@@ -216,6 +220,12 @@
       <div class="metric"><span class="metric-label">Watcher (мин)</span><span class="metric-value" id="ch-watcher-int">—</span></div>
       <div class="metric"><span class="metric-label">Watcher</span><span class="metric-value" id="ch-watcher">—</span></div>
     </div>
+
+    <form id="form-add-channel" class="channel-add-bar">
+      <input type="text" id="add-channel-input" placeholder="@username, ссылка t.me/… или +инвайт" />
+      <input type="text" id="add-channel-title" placeholder="Название (необязательно)" />
+      <button class="btn btn-primary" type="submit">+ Добавить канал</button>
+    </form>
 
     <div class="search-box">
       <input type="search" id="channels-search" placeholder="Поиск по названию или @username…" />
@@ -236,6 +246,68 @@
         </thead>
         <tbody id="channels-tbody">
           <tr><td colspan="7" class="empty">Загрузка…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: ПРОКСИ ============================== -->
+  <section class="tab-pane" id="tab-proxies">
+    <div class="page-header">
+      <h2>Прокси</h2>
+      <div class="page-actions">
+        <button class="btn btn-ghost" id="btn-refresh-proxies">Обновить</button>
+      </div>
+    </div>
+
+    <p class="muted">Прокси используются при авторизации и работе аккаунтов. Привязать прокси к аккаунту можно на вкладке «Аккаунты».</p>
+
+    <form id="form-add-proxy" class="proxy-add">
+      <div class="form-grid-2">
+        <div class="form-row">
+          <label>Тип</label>
+          <select name="type">
+            <option value="socks5">SOCKS5</option>
+            <option value="http">HTTP</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>IP / хост</label>
+          <input type="text" name="ip" placeholder="123.45.67.89" required />
+        </div>
+        <div class="form-row">
+          <label>Порт</label>
+          <input type="number" name="port" min="1" max="65535" placeholder="1080" required />
+        </div>
+        <div class="form-row">
+          <label>Логин (необязательно)</label>
+          <input type="text" name="username" placeholder="user" />
+        </div>
+        <div class="form-row">
+          <label>Пароль (необязательно)</label>
+          <input type="password" name="password" placeholder="••••" />
+        </div>
+      </div>
+      <div class="page-actions">
+        <button class="btn btn-ghost" type="button" id="btn-check-proxy">Проверить</button>
+        <button class="btn btn-primary" type="submit">+ Добавить прокси</button>
+        <span class="muted small" id="proxy-check-result"></span>
+      </div>
+    </form>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Тип</th>
+            <th>Адрес</th>
+            <th>Логин</th>
+            <th>Аккаунтов</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="proxies-tbody">
+          <tr><td colspan="5" class="empty">Загрузка…</td></tr>
         </tbody>
       </table>
     </div>
@@ -455,6 +527,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=2"></script>
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>
