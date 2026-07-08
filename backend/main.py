@@ -43,12 +43,33 @@ from modules.channel_health_watcher import ChannelHealthWatcher
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 STATIC_DIR = os.path.join(ROOT_DIR, 'static')
 
-# Определяем директорию сессий: SESSIONS_DIR env > data/sessions/ > sessions/ (legacy)
+# Serverless (Vercel) detection.
+# На Vercel файловая система только для чтения, писать можно лишь в /tmp,
+# а фоновые воркеры/Telethon-сессии там всё равно не живут (функция короткоживущая).
+# Поэтому на serverless: (1) все данные пишем в /tmp, (2) не стартуем воркеры.
+IS_SERVERLESS = bool(os.getenv('VERCEL') or os.getenv('AWS_LAMBDA_FUNCTION_NAME'))
+
+# Базовая директория для данных (БД + сессии).
+# DATA_DIR env > /tmp на serverless > <project>/data локально.
+_data_dir_env = os.environ.get('DATA_DIR')
+if _data_dir_env:
+    DATA_DIR = _data_dir_env
+elif IS_SERVERLESS:
+    DATA_DIR = '/tmp/neuro-commenting'
+else:
+    DATA_DIR = os.path.join(ROOT_DIR, 'data')
+
+# Путь к SQLite-базе (singleton Database инициализируется этим путём первым).
+DATABASE_PATH = os.path.join(DATA_DIR, 'bot.db')
+
+# Определяем директорию сессий: SESSIONS_DIR env > DATA_DIR/sessions > sessions/ (legacy)
 _sessions_dir_env = os.environ.get('SESSIONS_DIR')
 if _sessions_dir_env:
     SESSIONS_DIR = _sessions_dir_env
+elif IS_SERVERLESS:
+    SESSIONS_DIR = os.path.join(DATA_DIR, 'sessions')
 else:
-    _data_sessions = os.path.join(ROOT_DIR, 'data', 'sessions')
+    _data_sessions = os.path.join(DATA_DIR, 'sessions')
     _legacy_sessions = os.path.join(ROOT_DIR, 'sessions')
     if os.path.exists(_data_sessions) or not (os.path.exists(_legacy_sessions) and os.listdir(_legacy_sessions)):
         SESSIONS_DIR = _data_sessions
@@ -64,6 +85,15 @@ health_watcher: Optional[ChannelHealthWatcher] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global health_watcher
+
+    # На serverless (Vercel) фоновые задачи и воркеры не работают:
+    # функция короткоживущая, а Telethon-сессии/потоки не переживают инстанс.
+    # Поднимаем только HTTP-дашборд, ничего в фоне не запускаем.
+    if IS_SERVERLESS:
+        print("⚡ Serverless-режим: воркеры и health-watcher отключены (только дашборд).")
+        yield
+        return
+
     # Очистка старых логов при старте (старше 7 дней)
     deleted_logs = db.cleanup_old_logs(days=7)
     if deleted_logs > 0:
@@ -143,7 +173,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-db = Database(Config.DATABASE_PATH)
+db = Database(DATABASE_PATH)
 db.sanitize_channels()
 auth = AuthManager(sessions_dir=SESSIONS_DIR)
 
@@ -1651,7 +1681,7 @@ async def start_discovery(background_tasks: BackgroundTasks):
     explorer = ChannelExplorer(active_worker.client, db, active_worker.account_id)
     # Сохраняем ссылку на explorer в воркере для возможности остановки
     active_worker.channel_explorer = explorer
-    # Запускаем в цикле воркера, так как клиент привязан к нему
+    # Зап��скаем в цикле воркера, так как клиент привязан к нему
     coro = explorer.run_discovery_cycle()
     future = active_worker.run_task(coro)
     if not future:
