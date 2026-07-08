@@ -119,12 +119,14 @@ document.querySelectorAll('.tab').forEach(btn => {
     if (btn.dataset.tab === 'channels') Channels.refresh();
     if (btn.dataset.tab === 'logs') Logs.refresh();
     if (btn.dataset.tab === 'accounts') Accounts.refresh();
+    if (btn.dataset.tab === 'proxies') Proxies.refresh();
   });
 });
 
 // ============ ACCOUNTS ============
 const Accounts = {
   data: [],
+  proxies: [],
   async refresh() {
     const grid = document.getElementById('accounts-grid');
     try {
@@ -133,6 +135,7 @@ const Accounts = {
       grid.innerHTML = `<div class="empty">Ошибка: ${escape(e.message)}</div>`;
       return;
     }
+    try { this.proxies = await API.get('/proxies'); } catch { this.proxies = []; }
     document.getElementById('m-accounts').textContent = this.data.length;
     document.getElementById('m-running').textContent =
       this.data.filter(a => a.is_running).length;
@@ -145,6 +148,27 @@ const Accounts = {
     grid.querySelectorAll('[data-act]').forEach(b => {
       b.addEventListener('click', () => this.action(b.dataset.act, +b.dataset.id));
     });
+    grid.querySelectorAll('[data-proxy-for]').forEach(sel => {
+      sel.addEventListener('change', () => this.assignProxy(+sel.dataset.proxyFor, sel.value));
+    });
+  },
+  proxyOptions(currentId) {
+    const opts = ['<option value="">Без прокси</option>'];
+    for (const p of this.proxies) {
+      const sel = String(p.id) === String(currentId) ? ' selected' : '';
+      const label = `${(p.type || 'http').toUpperCase()} ${p.ip}:${p.port}`;
+      opts.push(`<option value="${p.id}"${sel}>${escape(label)}</option>`);
+    }
+    return opts.join('');
+  },
+  async assignProxy(accId, proxyId) {
+    try {
+      await API.post(`/accounts/${accId}/proxy`, { proxy_id: proxyId ? Number(proxyId) : null });
+      toast(proxyId ? 'Прокси привязан' : 'Прокси отвязан', 'ok');
+    } catch (e) {
+      toast(e.message, 'error');
+      this.refresh();
+    }
   },
   renderCard(a) {
     const status = a.is_running ? 'running' : (a.status || 'stopped');
@@ -169,6 +193,10 @@ const Accounts = {
         </div>
         <div class="account-meta">
           <span>Health</span><span>${escape(a.health_status || '—')}</span>
+        </div>
+        <div class="account-proxy">
+          <span class="muted">Прокси</span>
+          <select data-proxy-for="${a.id}">${this.proxyOptions(a.proxy_id)}</select>
         </div>
         <div class="account-actions">
           ${a.is_running
@@ -348,90 +376,137 @@ document.getElementById('form-import-session').addEventListener('submit', async 
   }
 });
 
-// ============ SETTINGS / TOGGLES (общая логика) ============
-const Settings = {
-  current: {},
-  async load() {
-    try {
-      this.current = await API.get('/settings');
-    } catch (e) {
-      toast(`Не удалось загрузить настройки: ${e.message}`, 'error');
-      return;
-    }
-    // распихиваем значения по всем элементам [data-setting]
-    for (const el of document.querySelectorAll('[data-setting]')) {
-      const k = el.dataset.setting;
-      if (!(k in this.current)) continue;
-      const v = this.current[k];
-      if (el.type === 'checkbox') el.checked = !!v;
-      else if (el.tagName === 'SELECT' || el.type === 'text' || el.type === 'password' ||
-               el.type === 'number' || el.tagName === 'TEXTAREA') {
-        el.value = v == null ? '' : v;
-      }
-    }
-    // Глобальная пауза в топбаре
-    document.getElementById('global-pause-toggle').checked = !!this.current.global_pause;
-    document.getElementById('m-pause').textContent = this.current.global_pause ? 'ВКЛ' : 'выкл';
-    document.getElementById('ch-watcher-int').textContent = this.current.channel_watcher_interval_minutes || 30;
+// ---- Переключение режимов добавления: .session / номер ----
+const PhoneAuth = {
+  phone: '',
+  reset() {
+    document.getElementById('form-phone-step1')?.classList.remove('hidden');
+    document.getElementById('form-phone-step2')?.classList.add('hidden');
+    document.getElementById('form-phone-step3')?.classList.add('hidden');
+    document.getElementById('form-phone-step1')?.reset();
+    document.getElementById('form-phone-step2')?.reset();
+    document.getElementById('form-phone-step3')?.reset();
   },
-  async save(diff) {
+  show(step) {
+    document.getElementById('form-phone-step1').classList.toggle('hidden', step !== 1);
+    document.getElementById('form-phone-step2').classList.toggle('hidden', step !== 2);
+    document.getElementById('form-phone-step3').classList.toggle('hidden', step !== 3);
+  },
+  async fillProxies() {
+    const sel = document.getElementById('phone-proxy-select');
+    if (!sel) return;
     try {
-      await API.post('/settings', diff);
-      this.current = { ...this.current, ...diff };
-      const hint = document.getElementById('behavior-saved-hint');
-      if (hint) {
-        hint.textContent = '✓ Сохранено';
-        clearTimeout(this._h);
-        this._h = setTimeout(() => hint.textContent = '', 1800);
-      }
-    } catch (e) {
-      toast(`Сохранение: ${e.message}`, 'error');
-    }
+      const proxies = await API.get('/proxies');
+      sel.innerHTML = '<option value="">Без прокси</option>' +
+        proxies.map(p => `<option value="${p.id}">${escape((p.type || 'http').toUpperCase())} ${escape(p.ip)}:${escape(String(p.port))}</option>`).join('');
+    } catch { /* необязательно */ }
   },
 };
 
-// чекбоксы → автосейв при изменении
-document.addEventListener('change', async (e) => {
-  const el = e.target;
-  if (!el.matches('[data-setting]')) return;
-  if (el.type !== 'checkbox') return;
-  const k = el.dataset.setting;
-  await Settings.save({ [k]: el.checked });
+document.querySelectorAll('.modal-switch-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.modal-switch-btn').forEach(b => b.classList.toggle('active', b === btn));
+    const mode = btn.dataset.mode;
+    document.getElementById('mode-session').classList.toggle('hidden', mode !== 'session');
+    document.getElementById('mode-phone').classList.toggle('hidden', mode !== 'phone');
+    if (mode === 'phone') { PhoneAuth.reset(); PhoneAuth.fillProxies(); }
+  });
 });
 
-// глобальная пауза
-document.getElementById('global-pause-toggle').addEventListener('change', async (e) => {
-  await Settings.save({ global_pause: e.target.checked });
-  document.getElementById('m-pause').textContent = e.target.checked ? 'ВКЛ' : 'выкл';
-});
-
-// кнопка Сохранить (для текстовых полей и select'ов)
-document.getElementById('btn-save-settings').addEventListener('click', async () => {
-  const diff = {};
-  for (const el of document.querySelectorAll('#tab-settings [data-setting]')) {
-    const k = el.dataset.setting;
-    if (el.type === 'checkbox') diff[k] = el.checked;
-    else if (el.type === 'number') diff[k] = el.value === '' ? null : Number(el.value);
-    else diff[k] = el.value;
-  }
-  // фильтруем null
-  for (const k in diff) if (diff[k] === null || diff[k] === undefined) delete diff[k];
-  await Settings.save(diff);
-  toast('Настройки сохранены', 'ok');
-});
-
-// тест нейросети
-document.getElementById('btn-test-ai').addEventListener('click', async () => {
-  const out = document.getElementById('settings-test-result');
-  out.innerHTML = '<span class="muted">Проверяю…</span>';
+// Прячем ручные API-поля в режиме номера, если ключи уже заданы
+(async () => {
   try {
-    const r = await API.post('/settings/test-ai');
-    if (r.status === 'ok') out.innerHTML = `<span class="pill good">${escape(r.message)}</span> <span class="muted small">${escape(r.reply || '')}</span>`;
-    else                   out.innerHTML = `<span class="pill bad">${escape(r.message)}</span>`;
-  } catch (e) {
-    out.innerHTML = `<span class="pill bad">Ошибка: ${escape(e.message)}</span>`;
+    const cfg = await API.get('/config-status');
+    if (cfg && cfg.api_configured) {
+      document.getElementById('phone-api-fields')?.classList.add('hidden');
+      document.getElementById('phone-api-note')?.classList.remove('hidden');
+    }
+  } catch (_) { /* необязательно */ }
+})();
+
+// Шаг 1 — отправка кода
+document.getElementById('form-phone-step1').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const phone = (f.phone.value || '').trim();
+  if (!phone) { toast('Укажите номер', 'error'); return; }
+  const body = { phone };
+  const proxyId = f.proxy_id.value;
+  if (proxyId) body.proxy_id = Number(proxyId);
+  if (f.api_id.value) body.api_id = Number(f.api_id.value);
+  if ((f.api_hash.value || '').trim()) body.api_hash = f.api_hash.value.trim();
+
+  const submitBtn = f.querySelector('button[type="submit"]');
+  submitBtn.disabled = true; submitBtn.textContent = 'Отправка…';
+  try {
+    const r = await API.post('/auth/send-code', body);
+    PhoneAuth.phone = phone;
+    PhoneAuth.hash = r.phone_code_hash;
+    document.getElementById('phone-display').textContent = phone;
+    toast('Код отправлен в Telegram', 'ok');
+    PhoneAuth.show(2);
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    submitBtn.disabled = false; submitBtn.textContent = 'Отправить код';
   }
 });
+
+document.getElementById('phone-back-1').addEventListener('click', () => PhoneAuth.show(1));
+
+// Шаг 2 — проверка кода
+document.getElementById('form-phone-step2').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const code = (e.target.code.value || '').trim();
+  if (!code) { toast('Введите код', 'error'); return; }
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true; submitBtn.textContent = 'Проверка…';
+  try {
+    const r = await API.post('/auth/verify-code', {
+      phone: PhoneAuth.phone, code, phone_code_hash: PhoneAuth.hash,
+    });
+    if (r.status === 'password_required') {
+      toast('Нужен пароль 2FA', 'ok');
+      PhoneAuth.show(3);
+    } else {
+      await PhoneAuth.finish();
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    submitBtn.disabled = false; submitBtn.textContent = 'Подтвердить';
+  }
+});
+
+// Шаг 3 — пароль 2FA
+document.getElementById('form-phone-step3').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const password = e.target.password.value || '';
+  if (!password) { toast('Введите пароль', 'error'); return; }
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true; submitBtn.textContent = 'Вход…';
+  try {
+    await API.post('/auth/verify-password', { phone: PhoneAuth.phone, password });
+    await PhoneAuth.finish();
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    submitBtn.disabled = false; submitBtn.textContent = 'Войти';
+  }
+});
+
+// Завершение: сохраняем сессию как аккаунт
+PhoneAuth.finish = async function () {
+  try {
+    await API.post('/accounts', { phone: this.phone });
+    toast('Аккаунт добавлен', 'ok');
+    modal.classList.add('hidden');
+    this.reset();
+    Accounts.refresh();
+  } catch (err) {
+    toast('Авторизация прошла, но сохранить не удалось: ' + err.message, 'error');
+  }
+};
 
 // ============ CHANNELS ============
 const Channels = {
@@ -467,7 +542,11 @@ const Channels = {
         <td>${c.can_comment ? '<span class="pill good">открыты</span>' : '<span class="pill bad">закрыты</span>'}</td>
         <td class="muted small">${escape(c.source || '—')}</td>
         <td class="muted small">${escape((c.last_checked || '').slice(0, 16))}</td>
-        <td><button class="btn btn-ghost btn-sm" data-del="${escape(c.channel)}">×</button></td>
+        <td>
+          <button class="btn btn-ghost btn-sm" data-recheck="${escape(c.channel)}" title="Перепроверить">↻</button>
+          <button class="btn btn-ghost btn-sm" data-comment="${escape(c.channel)}" title="Комментить сейчас">✎</button>
+          <button class="btn btn-ghost btn-sm" data-del="${escape(c.channel)}" title="Удалить">×</button>
+        </td>
       </tr>
     `).join('');
     tbody.querySelectorAll('[data-del]').forEach(b => {
@@ -477,6 +556,28 @@ const Channels = {
           await API.del(`/discovery/channels/${encodeURIComponent(b.dataset.del)}`);
           this.refresh();
         } catch (e) { toast(e.message, 'error'); }
+      });
+    });
+    tbody.querySelectorAll('[data-recheck]').forEach(b => {
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        try {
+          const r = await API.post(`/discovery/channels/${encodeURIComponent(b.dataset.recheck)}/recheck`);
+          toast((r && r.message) || 'Перепроверено', 'ok');
+          this.refresh();
+        } catch (e) { toast(e.message, 'error'); }
+        finally { b.disabled = false; }
+      });
+    });
+    tbody.querySelectorAll('[data-comment]').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm(`Оставить комментарий в @${b.dataset.comment} сейчас?`)) return;
+        b.disabled = true;
+        try {
+          const r = await API.post(`/discovery/channels/${encodeURIComponent(b.dataset.comment)}/comment-now`);
+          toast((r && r.message) || 'Отправлено', 'ok');
+        } catch (e) { toast(e.message, 'error'); }
+        finally { b.disabled = false; }
       });
     });
   },
@@ -491,6 +592,125 @@ document.getElementById('btn-cleanup-channels').addEventListener('click', async 
   } catch (e) { toast(e.message, 'error'); }
 });
 document.getElementById('channels-search').addEventListener('input', () => Channels.render());
+
+// Ручное добавление канала
+document.getElementById('form-add-channel').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('add-channel-input');
+  const titleEl = document.getElementById('add-channel-title');
+  const channel = (input.value || '').trim();
+  if (!channel) { toast('Укажите канал', 'error'); return; }
+  try {
+    await API.post('/discovery/channels/add', { channel, title: (titleEl.value || '').trim() });
+    toast('Канал добавлен', 'ok');
+    input.value = ''; titleEl.value = '';
+    Channels.refresh();
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+// Обслуживание базы каналов
+function bindChannelMaintenance(btnId, path, confirmMsg) {
+  const el = document.getElementById(btnId);
+  if (!el) return;
+  el.addEventListener('click', async () => {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    el.disabled = true;
+    const label = el.textContent;
+    el.textContent = 'Выполняю…';
+    try {
+      const r = await API.post(path);
+      toast((r && r.message) || 'Готово', 'ok');
+      Channels.refresh();
+    } catch (e) { toast(e.message, 'error'); }
+    finally { el.disabled = false; el.textContent = label; }
+  });
+}
+bindChannelMaintenance('btn-recheck-closed', '/discovery/channels/recheck-all-closed', 'Перепроверить все каналы с закрытыми комментариями? Может занять время.');
+bindChannelMaintenance('btn-join-private', '/discovery/channels/join-private', 'Отправить заявки на вступление во все приватные каналы?');
+bindChannelMaintenance('btn-reset-closed', '/discovery/channels/reset-closed', 'Сбросить статус «закрытые» у каналов?');
+
+// ============ PROXIES ============
+const Proxies = {
+  data: [],
+  async refresh() {
+    const tbody = document.getElementById('proxies-tbody');
+    try {
+      this.data = await API.get('/proxies');
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Ошибка: ${escape(e.message)}</td></tr>`;
+      return;
+    }
+    // считаем, сколько аккаунтов привязано к каждому прокси
+    let usage = {};
+    try {
+      const accs = Accounts.data.length ? Accounts.data : await API.get('/accounts');
+      for (const a of accs) if (a.proxy_id) usage[a.proxy_id] = (usage[a.proxy_id] || 0) + 1;
+    } catch { /* необязательно */ }
+
+    if (!this.data.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Нет прокси. Добавьте прокси через форму выше.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = this.data.map(p => `
+      <tr>
+        <td><span class="pill">${escape((p.type || 'http').toUpperCase())}</span></td>
+        <td class="mono">${escape(p.ip)}:${escape(String(p.port))}</td>
+        <td class="muted small">${escape(p.username || '—')}</td>
+        <td class="muted">${usage[p.id] || 0}</td>
+        <td><button class="btn btn-danger btn-sm" data-del-proxy="${p.id}">Удалить</button></td>
+      </tr>
+    `).join('');
+    tbody.querySelectorAll('[data-del-proxy]').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm('Удалить прокси? Он будет отвязан от всех аккаунтов.')) return;
+        try {
+          await API.del(`/proxies/${b.dataset.delProxy}`);
+          toast('Прокси удалён', 'ok');
+          this.refresh();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    });
+  },
+  readForm() {
+    const f = document.getElementById('form-add-proxy');
+    const port = Number(f.port.value);
+    return {
+      type: f.type.value,
+      ip: (f.ip.value || '').trim(),
+      port: Number.isFinite(port) ? port : 0,
+      username: (f.username.value || '').trim() || null,
+      password: (f.password.value || '').trim() || null,
+    };
+  },
+};
+document.getElementById('btn-refresh-proxies').addEventListener('click', () => Proxies.refresh());
+
+document.getElementById('form-add-proxy').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = Proxies.readForm();
+  if (!body.ip || !body.port) { toast('Укажите IP и порт', 'error'); return; }
+  try {
+    await API.post('/proxies', body);
+    toast('Прокси добавлен', 'ok');
+    e.target.reset();
+    Proxies.refresh();
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+document.getElementById('btn-check-proxy').addEventListener('click', async () => {
+  const out = document.getElementById('proxy-check-result');
+  const body = Proxies.readForm();
+  if (!body.ip || !body.port) { toast('Укажите IP и порт', 'error'); return; }
+  out.innerHTML = '<span class="muted">Проверяю…</span>';
+  try {
+    const r = await API.post('/proxies/check', body);
+    out.innerHTML = r.status === 'ok'
+      ? `<span class="pill good">${escape(r.message)}</span>`
+      : `<span class="pill bad">${escape(r.message)}</span>`;
+  } catch (e) {
+    out.innerHTML = `<span class="pill bad">Ошибка: ${escape(e.message)}</span>`;
+  }
+});
 
 // ============ LOGS ============
 const Logs = {
