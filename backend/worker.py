@@ -112,6 +112,10 @@ class BotWorker:
         # Кэш настроек (60 секунд TTL)
         self._settings_cache: Dict[str, tuple] = {}  # key -> (value, timestamp)
         self._settings_cache_ttl = 60
+
+        # Кэш entity каналов для "комментить от имени группы" (send_as)
+        # username -> entity | None (None = не удалось резолвить)
+        self._send_as_cache: Dict[str, object] = {}
         
         # === Новые компоненты для трёх тоглов ===
         # Классификатор мусорных чатов (создаётся лениво в start()).
@@ -183,6 +187,55 @@ class BotWorker:
         value = self.db.get_setting(key, default)
         self._settings_cache[key] = (value, current_time)
         return value
+
+    async def _resolve_send_as(self):
+        """
+        Возвращает entity канала, от имени которого нужно писать комменты
+        ("от имени группы"), либо None если фича выключена / аккаунт пишет от себя.
+
+        Требует, чтобы аккаунт был администратором указанного канала.
+        Результат кэшируется, чтобы не дёргать get_entity каждый раз.
+        """
+        if not self._get_cached_setting("comment_as_channel", False):
+            return None
+
+        username = (self._get_cached_setting("comment_as_channel_username", "") or "").strip()
+        if not username:
+            return None
+
+        username = Config.normalize_channel(username)
+        if username in self._send_as_cache:
+            return self._send_as_cache[username]
+
+        try:
+            entity = await self.client.get_entity(username)
+        except Exception as e:
+            self.log(f"⚠️ Не удалось получить канал для send-as @{username}: {e}. Пишу от аккаунта.", "warning")
+            entity = None
+
+        self._send_as_cache[username] = entity
+        return entity
+
+    async def _send_comment_message(self, channel, message, post_id):
+        """
+        Отправляет комментарий к посту.
+
+        Если включён тоггл "комментить от имени группы" (send_as) — сначала
+        пробует запостить от имени канала. При любой ошибке отправки от имени
+        канала — откатывается на отправку от личного аккаунта.
+        """
+        send_as = await self._resolve_send_as()
+        if send_as is not None:
+            try:
+                return await self.client.send_message(
+                    entity=channel, message=message, comment_to=post_id, send_as=send_as
+                )
+            except Exception as e:
+                self.log(
+                    f"⚠️ Не удалось запостить от имени канала ({e}). Пишу от личного аккаунта.",
+                    "warning",
+                )
+        return await self.client.send_message(entity=channel, message=message, comment_to=post_id)
 
     async def _simulate_typing(self, entity, seconds: float = 2.0):
         """
@@ -786,10 +839,11 @@ class BotWorker:
                     else:
                         self.log(f"⚡ Пост свежий ({post_age_minutes:.1f} мин), Quick Mode активен!")
                 
-                # Список заглушек для быстрого режима
+                # Список заглушек для быстрого режима.
+                # Все начинаются с "_" (как просил юзер): кидаем "_" чтобы быть
+                # первым в комментах, а потом редактируем на текст нейронки.
                 quick_placeholders = [
-                    "🔥", "👀", "😮", "🤔", "👍", "💯", "⚡", "✨", "🎯", "💪",
-                    "...", "хм", "ого", "вау", "ну", "да", "оо", "эм"
+                    "_", "_.", "_..", "_ ", "_-", "_·", "_,", "_—"
                 ]
                 
                 result = None
@@ -798,7 +852,7 @@ class BotWorker:
                     # БЫСТРЫЙ РЕЖИМ: сначала отправляем заглушку
                     placeholder = random.choice(quick_placeholders)
                     try:
-                        result = await self.client.send_message(entity=channel, message=placeholder, comment_to=post.id)
+                        result = await self._send_comment_message(channel, placeholder, post.id)
                         self.log(f"⚡ Быстрый коммент отправлен в {name}, генерирую текст...")
                     except Exception as e:
                         self.log(f"❌ Ошибка быстрого комментария в {name}: {e}", "error")
@@ -869,7 +923,7 @@ class BotWorker:
                             await self.client.delete_messages(discussion_chat or channel, [result.id])
                         except:
                             pass
-                        result = await self.client.send_message(entity=channel, message=comment, comment_to=post.id)
+                        result = await self._send_comment_message(channel, comment, post.id)
                 else:
                     # ОБЫЧНЫЙ РЕЖИМ: задержка и отправка
                     delay_mult = Config.MODE_DELAY_MULT.get(mode, 1.0)
@@ -879,13 +933,13 @@ class BotWorker:
                     # Режим прогрева - увеличиваем задержки в 2.5 раза (только для обычного режима)
                     if self._get_cached_setting("warmup_mode", False):
                         delay_mult *= 2.5
-                        self.log(f"🔥 Warmup Mode активен - задержки увеличены в 2.5 раза")
+                        self.log(f"🔥 Warmup Mode активен - задержки ув��личены в 2.5 раза")
                     
                     delay = random.randint(delay_min, delay_max) * delay_mult
                     self.log(f"⏳ Ожидание {delay:.1f} сек. (Режим: {mode})")
                     await asyncio.sleep(delay)
                     
-                    result = await self.client.send_message(entity=channel, message=comment, comment_to=post.id)
+                    result = await self._send_comment_message(channel, comment, post.id)
                 
                 self.db.mark_post_processed(self.account_id, name, post.id)
                 self.db.increment_stat(self.account_id, 'comments')
@@ -1052,7 +1106,7 @@ class BotWorker:
                     self.db.unlock_channel(name)  # Разблокируем канал
                     continue  # НЕ считаем ошибкой аккаунта!
                 
-                # Канал недоступен - username не занят или невалидный
+                # Канал ��едоступен - username не занят или невалидный
                 if "username not occupied" in err_str or "username invalid" in err_str:
                     if is_account_frozen:
                         self.log(f"⚠️ Канал {name} недоступен (аккаунт заморожен), пропускаю", "warning")
@@ -1883,7 +1937,7 @@ class BotWorker:
             'хантер', 'boku no hero', 'hero academia', 'геройская',
             'tokyo ghoul', 'токийский гуль', 'death note', 'тетрадь смерти',
             'fullmetal', 'стальной алхимик', 'sword art', 'мастер меча',
-            'spy x family', 'семья шпиона', 'bocchi', 'frieren', 'фрирен',
+            'spy x family', 'с��мья шпиона', 'bocchi', 'frieren', 'фрирен',
             'oshi no ko', 'звездное дитя', 'blue lock', 'блю лок',
             'dandadan', 'дандадан', 'kaiju', 'кайдзю', 'solo leveling',
             'поднятие уровня', 'mushoku', 'безработн', 'konosuba', 'коносуба',
@@ -2160,7 +2214,7 @@ class BotWorker:
                     if not isinstance(peer, Channel):
                         continue
                     
-                    # Проверяем что это broadcast канал, а не группа
+                    # Пров��ряем что это broadcast канал, а не группа
                     if not getattr(peer, 'broadcast', False):
                         continue
                     
