@@ -791,6 +791,103 @@ function escape(s) {
     .replace(/"/g, '&quot;');
 }
 
+// ============ SETTINGS ============
+const Settings = {
+  fields() { return Array.from(document.querySelectorAll('[data-setting]')); },
+
+  async load() {
+    let data;
+    try {
+      data = await API.get('/settings');
+    } catch (e) {
+      console.log('[v0] Settings load error:', e.message);
+      return;
+    }
+    for (const el of this.fields()) {
+      const key = el.dataset.setting;
+      if (!(key in data)) continue;
+      const val = data[key];
+      if (el.type === 'checkbox') {
+        el.checked = !!val;
+      } else if (val === null || val === undefined) {
+        el.value = '';
+      } else {
+        el.value = val;
+      }
+    }
+    // Глобальная пауза
+    const pause = document.getElementById('global-pause-toggle');
+    if (pause && 'global_pause' in data) pause.checked = !!data.global_pause;
+  },
+
+  collect() {
+    const payload = {};
+    for (const el of this.fields()) {
+      const key = el.dataset.setting;
+      if (el.type === 'checkbox') {
+        payload[key] = el.checked;
+      } else if (el.type === 'number') {
+        const raw = el.value.trim();
+        if (raw === '') continue;            // пустое число не отправляем
+        const num = Number(raw);
+        if (!Number.isNaN(num)) payload[key] = num;
+      } else {
+        payload[key] = el.value;
+      }
+    }
+    return payload;
+  },
+
+  async save() {
+    const btn = document.getElementById('btn-save-settings');
+    const payload = this.collect();
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = 'Сохранение…';
+    try {
+      await API.post('/settings', payload);
+      toast('Настройки сохранены', 'ok');
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  },
+
+  async testAI() {
+    const out = document.getElementById('settings-test-result');
+    const btn = document.getElementById('btn-test-ai');
+    btn.disabled = true;
+    if (out) out.innerHTML = '<span class="muted">Проверяю нейросеть…</span>';
+    try {
+      // Сначала сохраняем ключ/модель, чтобы тест шёл по текущим значениям
+      await API.post('/settings', this.collect());
+      const r = await API.post('/settings/test-ai');
+      const ok = r.status === 'ok' || r.status === 'success';
+      if (out) out.innerHTML = `<span class="pill ${ok ? 'good' : 'bad'}">${escape(r.message || (ok ? 'OK' : 'Ошибка'))}</span>`;
+      toast(r.message || (ok ? 'Нейросеть отвечает' : 'Ошибка нейросети'), ok ? 'ok' : 'error');
+    } catch (e) {
+      if (out) out.innerHTML = `<span class="pill bad">Ошибка: ${escape(e.message)}</span>`;
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  },
+};
+
+document.getElementById('btn-save-settings')?.addEventListener('click', () => Settings.save());
+document.getElementById('btn-test-ai')?.addEventListener('click', () => Settings.testAI());
+document.getElementById('global-pause-toggle')?.addEventListener('change', async (e) => {
+  try {
+    await API.post('/settings', { global_pause: e.target.checked });
+    toast(e.target.checked ? 'Глобальная пауза включена' : 'Глобальная пауза выключена', 'ok');
+  } catch (err) {
+    toast(err.message, 'error');
+    e.target.checked = !e.target.checked;
+  }
+});
+
 // ============ BOOT ============
 async function boot() {
   await Settings.load();
