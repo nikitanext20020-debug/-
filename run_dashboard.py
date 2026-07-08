@@ -14,10 +14,46 @@
 Порт можно переопределить через переменную окружения PORT (по умолчанию 8000).
 """
 import os
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
+
+
+def _ensure_dependencies():
+    """
+    Проверяет, что ключевые зависимости установлены. Если нет — ставит их
+    из requirements.txt в текущий Python автоматически.
+    Так `python run_dashboard.py` работает даже без ручной установки.
+    """
+    try:
+        import uvicorn  # noqa: F401
+        import fastapi  # noqa: F401
+        import telethon  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    req = os.path.join(here, 'requirements.txt')
+    if not os.path.exists(req):
+        print("❌ requirements.txt не найден — не могу установить зависимости.")
+        sys.exit(1)
+
+    print("=" * 52)
+    print("  📦 Первый запуск: устанавливаю зависимости...")
+    print("  (это займёт 1-2 минуты, нужен интернет)")
+    print("=" * 52)
+    try:
+        subprocess.check_call(
+            [sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', req]
+        )
+    except subprocess.CalledProcessError:
+        print("\n❌ Не удалось установить зависимости.")
+        print("   Установи вручную:  python -m pip install -r requirements.txt")
+        sys.exit(1)
+    print("\n✅ Зависимости установлены.\n")
 
 
 def _open_browser_later(url: str, delay: float = 2.0):
@@ -36,6 +72,9 @@ def main():
     if here not in sys.path:
         sys.path.insert(0, here)
     os.chdir(here)
+
+    # Ставим зависимости, если их ещё нет (uvicorn/fastapi/telethon и т.д.)
+    _ensure_dependencies()
 
     # Грузим 1.envv (Config тоже делает это сам, но PORT/HOST нужны здесь).
     try:
