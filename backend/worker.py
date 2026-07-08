@@ -319,14 +319,16 @@ class BotWorker:
                 proxy_type_name = "SOCKS5" if proxy[0] == socks.SOCKS5 else "HTTP"
                 proxy_ip = proxy[1]
                 proxy_port = proxy[2]
-                self.log(f"🌐 Подключение через прокси: {proxy_type_name} {proxy_ip}:{proxy_port}")
+                self.log(f"🌐 Подключ��ние через прокси: {proxy_type_name} {proxy_ip}:{proxy_port}")
             else:
                 self.log("🌐 Подключение без прокси (прямое соединение)")
             
             # Определяем директорию сессий: SESSIONS_DIR env > data/sessions/ > sessions/ (legacy)
             sessions_dir = os.environ.get('SESSIONS_DIR')
             if not sessions_dir:
-                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+                # worker.py лежит в <project>/backend/, поэтому корень проекта — это "..",
+                # а НЕ "../.." (иначе путь уходит на уровень выше проекта и сессия не находится).
+                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
                 data_sessions = os.path.join(project_root, "data", "sessions")
                 legacy_sessions = os.path.join(project_root, "sessions")
                 
@@ -599,11 +601,11 @@ class BotWorker:
                     # Нет channel_id - бот ещё не вступил, пропускаем без ошибки
                     continue
             
-            # Проверка бана НА ЭТОМ аккаунте в этом канале
+            # Проверка бана НА ЭТОМ акка��нте в этом канале
             if self.db.is_banned(self.account_id, name):
                 continue
             
-            # Проверка блокировки другим аккаунтом И сразу блокируем если свободен
+            # Проверка блокировки другим аккаунт��м И сразу блокируем если свободен
             if self.db.is_channel_locked(self.account_id, name):
                 continue
             
@@ -1067,7 +1069,7 @@ class BotWorker:
                     self.is_running = False
                     return
                 
-                # ChatWriteForbidden - нет прав писать (не бан аккаунта, а ограничение канала)
+                # ChatWriteForbidden - н��т прав писать (не бан аккаунта, а ограничение канала)
                 if "chatwriteforbidden" in err_str or "can't write" in err_str:
                     self.log(f"⚠️ Нет прав писать в {name}, помечаю как забанен в канале", "warning")
                     self.db.mark_banned(self.account_id, name)
@@ -1347,7 +1349,7 @@ class BotWorker:
             # Пропускаем удалённые
             if self.db.is_channel_deleted(channel):
                 continue
-            # Пропускаем забаненные для этого аккаунта
+            # П��опускаем забаненные для этого аккаунта
             if self.db.is_banned(self.account_id, channel):
                 continue
             channels_to_join.append(channel)
