@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
 
@@ -44,6 +44,11 @@
     <button class="tab active" data-tab="accounts">Аккаунты</button>
     <button class="tab" data-tab="behavior">Поведение в чатах</button>
     <button class="tab" data-tab="channels">Каналы</button>
+    <button class="tab" data-tab="ownchannels">Мои каналы</button>
+    <button class="tab" data-tab="inviter">Инвайт</button>
+    <button class="tab" data-tab="masssend">Рассылки</button>
+    <button class="tab" data-tab="stats">Статистика</button>
+    <button class="tab" data-tab="comments">Комменты</button>
     <button class="tab" data-tab="proxies">Прокси</button>
     <button class="tab" data-tab="settings">Настройки</button>
     <button class="tab" data-tab="logs">Логи</button>
@@ -227,6 +232,58 @@
       <button class="btn btn-primary" type="submit">+ Добавить канал</button>
     </form>
 
+    <details class="panel-details" id="pending-panel">
+      <summary>Заявки на модерации <span class="pill" id="pending-count">0</span></summary>
+      <div class="panel-details-body">
+        <p class="muted small">Каналы/обсуждения, куда отправлена заявка на вступление. Бот сам перепроверяет их и начнёт работать после одобрения админом.</p>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Канал</th><th>Аккаунт</th><th>Статус</th><th>Запрошено</th><th>Проверок</th></tr></thead>
+            <tbody id="pending-tbody"><tr><td colspan="5" class="empty">Нет заявок</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel-details" id="filter-panel">
+      <summary>Фильтр каналов по качеству</summary>
+      <div class="panel-details-body">
+        <p class="muted small">Отсеивает мёртвые/мусорные каналы по подписчикам, просмотрам и активности. Нужен запущенный аккаунт. Пустой список каналов = фильтровать всю базу.</p>
+        <div class="form-grid-2">
+          <div class="form-row"><label>Мин. подписчиков</label><input type="number" id="flt-min-subs" value="1000" /></div>
+          <div class="form-row"><label>Мин. средних просмотров</label><input type="number" id="flt-min-views" value="300" /></div>
+          <div class="form-row"><label>Макс. дней без постов</label><input type="number" id="flt-max-days" value="7" /></div>
+          <div class="form-row"><label>Мин. постов в неделю</label><input type="number" id="flt-min-posts" value="2" /></div>
+        </div>
+        <div class="toggle-group">
+          <div class="toggle-row">
+            <div class="toggle-info"><div class="toggle-title">Только с открытыми комментами</div></div>
+            <label class="switch"><input type="checkbox" id="flt-open-comments" checked/><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
+            <div class="toggle-info"><div class="toggle-title">Отсеивать мусорные каналы (AI)</div></div>
+            <label class="switch"><input type="checkbox" id="flt-junk" checked/><span class="slider"></span></label>
+          </div>
+        </div>
+        <div class="form-row" style="margin-top:12px">
+          <label>Список каналов (по одному в строке, необязательно)</label>
+          <textarea id="flt-channels" rows="3" placeholder="@channel1&#10;@channel2"></textarea>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-primary" id="btn-filter-start">Запустить фильтр</button>
+          <button class="btn btn-ghost" id="btn-filter-stop">Стоп</button>
+          <button class="btn btn-ghost" id="btn-filter-apply">Удалить отсеянные</button>
+          <span class="muted small" id="filter-progress">—</span>
+        </div>
+        <div class="table-wrap" id="filter-results-wrap" style="margin-top:12px; display:none">
+          <table class="data-table">
+            <thead><tr><th>Канал</th><th>Статус</th><th>Причина</th></tr></thead>
+            <tbody id="filter-results-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
     <div class="search-box">
       <input type="search" id="channels-search" placeholder="Поиск по названию или @username…" />
     </div>
@@ -247,6 +304,254 @@
         <tbody id="channels-tbody">
           <tr><td colspan="7" class="empty">Загрузка…</td></tr>
         </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: МОИ КАНАЛЫ ============================== -->
+  <section class="tab-pane" id="tab-ownchannels">
+    <div class="page-header">
+      <h2>Мои каналы</h2>
+      <div class="page-actions">
+        <select id="own-acc-select" class="acc-select"></select>
+        <button class="btn btn-ghost" id="btn-refresh-own">Обновить</button>
+      </div>
+    </div>
+    <p class="muted">Создание собственных каналов, публикация и очередь постов. Аккаунт должен быть запущен.</p>
+
+    <div class="panel-grid">
+      <div class="panel">
+        <h3 class="section-h3">Создать канал</h3>
+        <form id="form-create-channel">
+          <div class="form-row"><label>Название</label>
+            <input type="text" name="title" placeholder="Мой канал" required /></div>
+          <div class="form-row"><label>Описание</label>
+            <textarea name="about" rows="2" placeholder="О чём канал"></textarea></div>
+          <div class="form-grid-2">
+            <div class="form-row"><label>Основа для @username</label>
+              <input type="text" name="username_base" placeholder="mychannel" required /></div>
+            <div class="form-row"><label>Тема (для авто-постов)</label>
+              <input type="text" name="topic" placeholder="крипта, новости…" required /></div>
+          </div>
+          <div class="form-row"><label>Аватарка (необязательно)</label>
+            <input type="file" name="avatar" accept="image/*" /></div>
+          <div class="page-actions">
+            <button class="btn btn-primary" type="submit">Создать канал</button>
+            <span class="muted small" id="create-channel-status"></span>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h3 class="section-h3">Каналы аккаунта</h3>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Канал</th><th>ID</th><th></th></tr></thead>
+            <tbody id="own-channels-tbody"><tr><td colspan="3" class="empty">Выберите аккаунт</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" id="own-post-panel" style="margin-top:16px">
+      <h3 class="section-h3">Публикация в канал: <span id="own-post-channel-label" class="muted">— не выбран —</span></h3>
+      <div class="panel-grid">
+        <div>
+          <form id="form-post-channel">
+            <div class="form-row"><label>Текст поста</label>
+              <textarea name="text" rows="4" placeholder="Текст поста (Markdown)"></textarea></div>
+            <div class="form-row"><label>Медиа (необязательно)</label>
+              <input type="file" name="media" accept="image/*,video/*" /></div>
+            <div class="page-actions">
+              <button class="btn btn-primary" type="submit" id="btn-post-now">Опубликовать</button>
+              <button class="btn btn-ghost" type="button" id="btn-queue-post">В очередь</button>
+            </div>
+          </form>
+        </div>
+        <div>
+          <form id="form-generate-post">
+            <div class="form-row"><label>Сгенерировать пост через AI</label>
+              <input type="text" name="topic" placeholder="Тема поста" /></div>
+            <div class="page-actions">
+              <button class="btn btn-primary" type="submit">Сгенерировать и опубликовать</button>
+            </div>
+          </form>
+          <h4 class="section-h3" style="margin-top:16px">Очередь</h4>
+          <div id="own-queue-list" class="mini-list"><span class="muted small">—</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: ИНВАЙТ ============================== -->
+  <section class="tab-pane" id="tab-inviter">
+    <div class="page-header">
+      <h2>Инвайтер</h2>
+      <div class="page-actions">
+        <select id="inv-acc-select" class="acc-select"></select>
+        <button class="btn btn-ghost" id="btn-refresh-inviter">Обновить</button>
+      </div>
+    </div>
+    <p class="muted">Парсинг участников из чата и приглашение их в ваш канал/группу. Аккаунт должен быть запущен.</p>
+
+    <div class="metrics-row">
+      <div class="metric"><span class="metric-label">Спарсено</span><span class="metric-value" id="inv-parsed">—</span></div>
+      <div class="metric"><span class="metric-label">Приглашено</span><span class="metric-value" id="inv-invited">—</span></div>
+      <div class="metric"><span class="metric-label">Ошибок</span><span class="metric-value" id="inv-errors">—</span></div>
+      <div class="metric"><span class="metric-label">Сегодня</span><span class="metric-value" id="inv-today">—</span></div>
+    </div>
+
+    <div class="panel-grid" style="margin-top:16px">
+      <div class="panel">
+        <h3 class="section-h3">1. Спарсить участников</h3>
+        <form id="form-parse-users">
+          <div class="form-row"><label>Чат-источник (@username или ссылка)</label>
+            <input type="text" name="chat_id" placeholder="@somechat" required /></div>
+          <div class="page-actions">
+            <button class="btn btn-primary" type="submit">Спарсить</button>
+            <span class="muted small" id="parse-status"></span>
+          </div>
+        </form>
+        <div class="form-row" style="margin-top:12px">
+          <label>Доступные чаты аккаунта</label>
+          <select id="inv-chats-select"><option value="">— загрузка —</option></select>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3 class="section-h3">2. Пригласить в канал</h3>
+        <form id="form-invite-start">
+          <div class="form-row"><label>ID вашего канала/группы</label>
+            <input type="number" name="channel_id" placeholder="-1001234567890" required /></div>
+          <div class="form-row"><label>Источник (@чат, необязательно — иначе берутся спарсенные)</label>
+            <input type="text" name="source_chat_id" placeholder="@somechat" /></div>
+          <div class="form-row"><label>Дневной лимит</label>
+            <input type="number" name="daily_limit" min="1" max="200" placeholder="50" /></div>
+          <div class="page-actions">
+            <button class="btn btn-primary" type="submit">Запустить инвайт</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: РАССЫЛКИ ============================== -->
+  <section class="tab-pane" id="tab-masssend">
+    <div class="page-header">
+      <h2>Массовые рассылки</h2>
+      <div class="page-actions">
+        <select id="ms-acc-select" class="acc-select"></select>
+        <button class="btn btn-ghost" id="btn-refresh-masssend">Обновить</button>
+      </div>
+    </div>
+    <p class="muted">Рассылка сообщений в ЛС пользователям или в группы. Используйте осторожно — риск ограничений Telegram.</p>
+
+    <div class="panel-grid">
+      <div class="panel">
+        <h3 class="section-h3">Рассылка в ЛС</h3>
+        <form id="form-ms-dm">
+          <div class="form-row"><label>ID пользователей (через запятую или с новой строки)</label>
+            <textarea name="user_ids" rows="3" placeholder="123456789, 987654321"></textarea></div>
+          <div class="form-row"><label>Текст сообщения</label>
+            <textarea name="message_template" rows="3" placeholder="Привет! …" required></textarea></div>
+          <div class="form-grid-2">
+            <div class="form-row"><label>Лимит в час</label>
+              <input type="number" name="hourly_limit" min="1" max="100" placeholder="20" /></div>
+            <div class="form-row"><label>Медиа (необязательно)</label>
+              <input type="file" name="media" accept="image/*,video/*" /></div>
+          </div>
+          <div class="page-actions"><button class="btn btn-primary" type="submit">Запустить ЛС-рассылку</button></div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h3 class="section-h3">Рассылка в группы</h3>
+        <form id="form-ms-groups">
+          <div class="form-row"><label>ID/username групп (через запятую или с новой строки)</label>
+            <textarea name="chat_ids" rows="3" placeholder="@group1, -1001234567890"></textarea></div>
+          <div class="form-row"><label>Текст сообщения</label>
+            <textarea name="message_template" rows="3" placeholder="Текст…" required></textarea></div>
+          <div class="form-grid-2">
+            <div class="form-row"><label>Лимит в час</label>
+              <input type="number" name="hourly_limit" min="1" max="100" placeholder="10" /></div>
+            <div class="form-row"><label>Медиа (необязательно)</label>
+              <input type="file" name="media" accept="image/*,video/*" /></div>
+          </div>
+          <div class="page-actions"><button class="btn btn-primary" type="submit">Запустить рассылку в группы</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h3 class="section-h3">Кампании</h3>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead><tr><th>ID</th><th>Название</th><th>Тип</th><th>Статус</th><th>Отправлено</th><th>Ошибок</th></tr></thead>
+          <tbody id="ms-campaigns-tbody"><tr><td colspan="6" class="empty">Выберите аккаунт</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: СТАТИСТИКА ============================== -->
+  <section class="tab-pane" id="tab-stats">
+    <div class="page-header">
+      <h2>Статистика</h2>
+      <div class="page-actions">
+        <button class="btn btn-ghost" id="btn-refresh-stats">Обновить</button>
+        <button class="btn btn-danger" id="btn-clear-stats">Очистить статистику</button>
+      </div>
+    </div>
+
+    <h3 class="section-h3">Всего</h3>
+    <div class="metrics-row">
+      <div class="metric"><span class="metric-label">Каналов в базе</span><span class="metric-value" id="st-total-channels">—</span></div>
+      <div class="metric"><span class="metric-label">Открытые комменты</span><span class="metric-value" id="st-open-channels">—</span></div>
+      <div class="metric"><span class="metric-label">Аккаунтов</span><span class="metric-value" id="st-accounts">—</span></div>
+      <div class="metric"><span class="metric-label">Комментариев всего</span><span class="metric-value" id="st-total-comments">—</span></div>
+      <div class="metric"><span class="metric-label">Лайков всего</span><span class="metric-value" id="st-total-likes">—</span></div>
+      <div class="metric"><span class="metric-label">Новых каналов сегодня</span><span class="metric-value" id="st-new-today">—</span></div>
+    </div>
+
+    <h3 class="section-h3" style="margin-top:20px">За 24 часа</h3>
+    <div class="metrics-row">
+      <div class="metric"><span class="metric-label">Комментариев</span><span class="metric-value" id="st-comments-24h">—</span></div>
+      <div class="metric"><span class="metric-label">Успешно сегодня</span><span class="metric-value" id="st-success-today">—</span></div>
+      <div class="metric"><span class="metric-label">Ошибок сегодня</span><span class="metric-value" id="st-errors-today">—</span></div>
+      <div class="metric"><span class="metric-label">Лайков</span><span class="metric-value" id="st-likes-24h">—</span></div>
+      <div class="metric"><span class="metric-label">Каналов охвачено</span><span class="metric-value" id="st-channels-24h">—</span></div>
+      <div class="metric"><span class="metric-label">Новых каналов</span><span class="metric-value" id="st-new-24h">—</span></div>
+    </div>
+
+    <h3 class="section-h3" style="margin-top:20px">Активность аккаунтов сегодня</h3>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Аккаунт</th><th>Комментариев</th></tr></thead>
+        <tbody id="st-accounts-tbody"><tr><td colspan="2" class="empty">Загрузка…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================== TAB: КОММЕНТЫ ============================== -->
+  <section class="tab-pane" id="tab-comments">
+    <div class="page-header">
+      <h2>Отправленные комментарии</h2>
+      <div class="page-actions">
+        <select id="cm-acc-select" class="acc-select"><option value="">Все аккаунты</option></select>
+        <button class="btn btn-ghost" id="btn-refresh-comments">Обновить</button>
+      </div>
+    </div>
+
+    <div class="search-box">
+      <input type="search" id="comments-search" placeholder="Поиск по тексту или каналу…" />
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>Канал</th><th>Текст</th><th>Тип</th><th>Когда</th><th></th></tr>
+        </thead>
+        <tbody id="comments-tbody"><tr><td colspan="5" class="empty">Загрузка…</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -581,6 +886,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=4"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>
