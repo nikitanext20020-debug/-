@@ -6,7 +6,7 @@ from telethon.errors import (
     MessageIdInvalidError, FloodWaitError, UserAlreadyParticipantError,
     InviteHashExpiredError, ChannelPrivateError, UserDeactivatedBanError,
     AuthKeyUnregisteredError, ChatWriteForbiddenError, SlowModeWaitError,
-    PeerFloodError,
+    PeerFloodError, InviteRequestSentError,
 )
 import socks
 import time
@@ -106,6 +106,10 @@ class BotWorker:
         # Кэш вступленных групп обсуждений (чтобы не вступать повторно каждый цикл)
         self._joined_discussion_groups: set = set()
         
+        # Группы обсуждений, куда отправлена заявка и мы ждём одобрения админа.
+        # Пока linked_chat_id здесь — канал не банится, а периодически перепроверяется.
+        self._pending_discussion_groups: set = set()
+        
         # Кэш вступленных каналов в этой сессии (channel -> True)
         self._joined_channels: set = set()
         
@@ -148,13 +152,34 @@ class BotWorker:
         return (proxy_type, self.proxy_data['ip'], self.proxy_data['port'], True, 
                 self.proxy_data.get('proxy_user'), self.proxy_data.get('proxy_pass'))
 
-    async def _join_discussion_group_if_needed(self, linked_chat_id: int, channel_name: str) -> bool:
+    async def _join_discussion_group_if_needed(self, linked_chat_id: int, channel_name: str):
         """
         Вступает в группу обсуждений если ещё не вступали.
-        Возвращает True если вступили (или уже были), False при ошибке.
+
+        Возвращает:
+          - True      — вступили (или уже состоим);
+          - "pending" — группа с модерацией, заявка отправлена, ждём одобрения
+                        админа (канал НЕ банить, перепроверить в след. цикле);
+          - False     — реальная ошибка (нет прав / приватная / не найдена).
         """
         if linked_chat_id in self._joined_discussion_groups:
             return True  # Уже вступали в этой сессии
+        
+        # Ждём одобрения — не спамим повторными заявками, но проверяем, не приняли ли уже.
+        if linked_chat_id in self._pending_discussion_groups:
+            try:
+                linked_chat = await self.client.get_entity(linked_chat_id)
+                # get_participant кинет исключение, если мы ещё не участники
+                from telethon.tl.functions.channels import GetParticipantRequest
+                await self.client(GetParticipantRequest(linked_chat, 'me'))
+                # Дошли сюда — заявку одобрили
+                self._pending_discussion_groups.discard(linked_chat_id)
+                self._joined_discussion_groups.add(linked_chat_id)
+                self.log(f"✅ Заявка в обсуждения {channel_name} одобрена, теперь я участник")
+                return True
+            except Exception:
+                self.log(f"⏳ Заявка в обсуждения {channel_name} ещё не одобрена, жду", "info")
+                return "pending"
         
         try:
             linked_chat = await self.client.get_entity(linked_chat_id)
@@ -162,12 +187,26 @@ class BotWorker:
             self._joined_discussion_groups.add(linked_chat_id)
             self.log(f"✅ Вступил в группу обсуждений для {channel_name}")
             return True
+        except InviteRequestSentError:
+            # Группа с модерацией — заявка отправлена, ждём одобрения
+            self._pending_discussion_groups.add(linked_chat_id)
+            self.log(f"⏳ Заявка на вступление в обсуждения {channel_name} отправлена, жду одобрения админа", "warning")
+            return "pending"
         except Exception as e:
             err_str = str(e).lower()
             # Если уже участник - это ок, добавляем в кэш
             if "already" in err_str or "participant" in err_str:
                 self._joined_discussion_groups.add(linked_chat_id)
+                self._pending_discussion_groups.discard(linked_chat_id)
                 return True
+            # Разные формулировки "заявка отправлена, ждите одобрения"
+            if (("request" in err_str and "sent" in err_str)
+                    or "successfully requested" in err_str
+                    or "join request" in err_str
+                    or "request to join" in err_str):
+                self._pending_discussion_groups.add(linked_chat_id)
+                self.log(f"⏳ Заявка на вступление в обсуждения {channel_name} отправлена, жду одобрения", "warning")
+                return "pending"
             return False
 
     def _get_cached_setting(self, key: str, default=None):
@@ -708,6 +747,10 @@ class BotWorker:
                                 joined = await self._join_discussion_group_if_needed(
                                     full_channel.full_chat.linked_chat_id, name
                                 )
+                                if joined == "pending":
+                                    # Заявка на модерации — НЕ баним, вернёмся к каналу позже
+                                    self.db.unlock_channel(name)
+                                    continue
                                 if joined:
                                     # Повторяем попытку получить обсуждение
                                     await asyncio.sleep(2)
@@ -875,7 +918,8 @@ class BotWorker:
                 
                 # Проверка на пустой комментарий (нейросеть не сработала)
                 if not comment or not comment.strip():
-                    self.log(f"⚠️ Нейросеть не вернула комментарий для {name}, пропускаю")
+                    reason = getattr(self.comment_generator, "last_error", "") or "неизвестная причина"
+                    self.log(f"⚠️ Нейросеть не вернула комментарий для {name} ({reason}), пропускаю", "warning")
                     # Если был быстрый коммент - удаляем заглушку
                     if quick_mode and result:
                         try:
@@ -1845,7 +1889,7 @@ class BotWorker:
             'я человек', "i'm human", 'start', 'начать'
         ]
         
-        # Известные антиспам-боты (проверяем по имени отправителя)
+        # Извест��ые антиспам-боты (проверяем по имени отправителя)
         antispam_bot_names = [
             'rose', 'combot', 'shieldy', 'captcha', 'guard', 'gatekeeper',
             'verificator', 'антиспам', 'antispam', 'welcome', 'greeter',

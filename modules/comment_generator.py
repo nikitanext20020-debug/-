@@ -17,6 +17,9 @@ class CommentGenerator:
         self._api_key_override = api_key
         self.db = db
         self._http_client: Optional[AsyncHTTPClient] = None
+        # Последняя причина, по которой комментарий не был сгенерирован.
+        # Воркер читает её, чтобы показать понятную ошибку в панели логов.
+        self.last_error: str = ""
     
     def _get_api_key(self) -> str:
         """Получает актуальный API ключ (из БД или конфига)"""
@@ -47,6 +50,22 @@ class CommentGenerator:
         if self._http_client is None:
             self._http_client = AsyncHTTPClient(max_retries=3, base_delay=1.0, timeout=30.0)
         return self._http_client
+
+    def _extract_api_error(self, data) -> str:
+        """Достаёт человекочитаемое сообщение об ошибке из ответа API."""
+        try:
+            if isinstance(data, dict):
+                err = data.get("error")
+                if isinstance(err, dict):
+                    return err.get("message") or err.get("code") or str(err)
+                if isinstance(err, str):
+                    return err
+                return str(data)[:200]
+            if data:
+                return str(data)[:200]
+        except Exception:
+            pass
+        return "нет тела ответа (проверьте ключ, модель и баланс)"
     
     async def generate_comment_async(
         self, 
@@ -63,7 +82,13 @@ class CommentGenerator:
         Returns:
             Сгенерированный комментарий
         """
+        self.last_error = ""
         try:
+            # Проверяем наличие API ключа заранее — самая частая причина "пустого" ответа
+            if not (self._get_api_key() or "").strip():
+                self.last_error = "не задан AI API ключ (Настройки → AI API ключ)"
+                return ""
+
             messages = []
             system_prompt = Config.COMMENT_PERSONA_SYSTEM
             
@@ -109,12 +134,18 @@ class CommentGenerator:
                 if len(words) > Config.COMMENT_MAX_WORDS + 5:
                     comment = " ".join(words[:Config.COMMENT_MAX_WORDS])
                 
+                if not comment:
+                    self.last_error = "модель вернула пустой ответ (возможно, сработал фильтр контента)"
                 return comment if comment else ""  # Пустая строка вместо fallback
             else:
+                # Пытаемся вытащить понятное сообщение об ошибке API
+                detail = self._extract_api_error(response.data)
+                self.last_error = f"API {response.status}: {detail}"
                 print(f"Ошибка API ({response.status}): {response.data}")
                 return ""  # Не отправляем шаблонные комментарии
 
         except Exception as e:
+            self.last_error = str(e)
             print(f"Ошибка генерации комментария: {e}")
             return ""  # Лучше не комментировать чем писать шаблон
     
@@ -150,9 +181,14 @@ class CommentGenerator:
     
     def _generate_comment_sync(self, post_text: str = "", image_bytes: Optional[bytes] = None) -> str:
         """Синхронная генерация комментария через requests"""
+        self.last_error = ""
         try:
             import requests
-            
+
+            if not (self._get_api_key() or "").strip():
+                self.last_error = "не задан AI API ключ (Настройки → AI API ключ)"
+                return ""
+
             messages = []
             system_prompt = Config.COMMENT_PERSONA_SYSTEM
             
@@ -203,12 +239,16 @@ class CommentGenerator:
                 if len(words) > Config.COMMENT_MAX_WORDS + 5:
                     comment = " ".join(words[:Config.COMMENT_MAX_WORDS])
                 
+                if not comment:
+                    self.last_error = "модель вернула пустой ответ (возможно, сработал фильтр контента)"
                 return comment if comment else ""  # Пустая строка вместо fallback
             else:
+                self.last_error = f"API {response.status_code}: {response.text[:200]}"
                 print(f"Ошибка API ({response.status_code}): {response.text}")
                 return ""  # Не отправляем шаблонные комментарии
 
         except Exception as e:
+            self.last_error = str(e)
             print(f"Ошибка синхронной генерации: {e}")
             return ""  # Лучше не комментировать чем писать шаблон
     
