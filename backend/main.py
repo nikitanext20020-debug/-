@@ -329,6 +329,34 @@ async def add_account(account: AccountCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _resolve_api_credentials(api_id: Optional[int], api_hash: Optional[str]):
+    """
+    Возвращает (api_id, api_hash) с приоритетом:
+      1) переданные вручную — при этом сохраняются в БД (запоминаются);
+      2) ранее сохранённые в БД;
+      3) глобальный конфиг из 1.envv.
+    """
+    api_hash = (api_hash or '').strip() or None
+
+    # 1) Переданные вручную — запоминаем в настройках
+    if api_id and api_hash:
+        try:
+            db.set_setting('telegram_api_id', int(api_id))
+            db.set_setting('telegram_api_hash', api_hash)
+        except Exception as e:
+            print(f"[WARN] не удалось сохранить API-ключи: {e}")
+        return int(api_id), api_hash
+
+    # 2) Сохранённые в БД
+    saved_id = db.get_setting('telegram_api_id', None)
+    saved_hash = db.get_setting('telegram_api_hash', None)
+    if saved_id and saved_hash:
+        return int(saved_id), str(saved_hash)
+
+    # 3) Глобальный конфиг
+    return Config.API_ID, Config.API_HASH
+
+
 @app.post("/import-session")
 async def import_session(
     file: UploadFile = File(...),
@@ -353,16 +381,13 @@ async def import_session(
         digits = ''.join(filter(str.isdigit, raw))
         phone = ('+' + digits) if len(digits) >= 10 else (raw or file.filename.replace('.session', ''))
 
-    # API-ключи: fallback на глобальный конфиг
-    if not api_id:
-        api_id = Config.API_ID
-    if not api_hash or not str(api_hash).strip():
-        api_hash = Config.API_HASH
+    # API-ключи: введённые вручную запоминаются в БД, иначе берём из БД/конфига
+    api_id, api_hash = _resolve_api_credentials(api_id, api_hash)
 
     if not api_id or not api_hash:
         raise HTTPException(
             status_code=400,
-            detail="Не заданы API ID / API Hash. Укажите их в форме или пропишите Api_id/Api_hash в 1.envv."
+            detail="Не заданы API ID / API Hash. Укажите их один раз при импорте — дальше запомнятся."
         )
 
     # Формируем имя сессии
@@ -402,16 +427,13 @@ async def import_sessions_bulk(
     api_id / api_hash опциональны — если не заданы, берутся из 1.envv.
     Телефон извлекается из имени каждого файла.
     """
-    # API-ключи: fallback на глобальный конфиг
-    if not api_id:
-        api_id = Config.API_ID
-    if not api_hash or not str(api_hash).strip():
-        api_hash = Config.API_HASH
+    # API-ключи: введённые вручную запоминаются в БД, иначе берём из БД/конфига
+    api_id, api_hash = _resolve_api_credentials(api_id, api_hash)
 
     if not api_id or not api_hash:
         raise HTTPException(
             status_code=400,
-            detail="Не заданы API ID / API Hash. Укажите их в форме или пропишите Api_id/Api_hash в 1.envv."
+            detail="Не заданы API ID / API Hash. Укажите их один раз при импорте — дальше запомнятся."
         )
 
     results = []
@@ -2664,6 +2686,9 @@ async def auth_status():
 
 @app.get("/config-status")
 async def config_status():
-    """Сообщает фронту, заданы ли глобальные API ID/Hash (из 1.envv).
+    """Сообщает фронту, заданы ли API ID/Hash (сохранённые в БД или из 1.envv).
     Если да — при импорте сессий не нужно вводить их вручную."""
-    return {"api_configured": bool(Config.API_ID and Config.API_HASH)}
+    saved_id = db.get_setting('telegram_api_id', None)
+    saved_hash = db.get_setting('telegram_api_hash', None)
+    configured = bool((saved_id and saved_hash) or (Config.API_ID and Config.API_HASH))
+    return {"api_configured": configured}
