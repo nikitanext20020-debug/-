@@ -78,6 +78,11 @@ else:
 
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
+# Пробрасываем итоговый путь воркерам через окружение, чтобы main и worker
+# всегда использовали ОДНУ И ТУ ЖЕ директорию сессий (иначе воркер ищет файл
+# сессии не там, создаёт пустой и падает с "Сессия не авторизована").
+os.environ['SESSIONS_DIR'] = SESSIONS_DIR
+
 # Холдер для глобального health-watcher
 health_watcher: Optional[ChannelHealthWatcher] = None
 
@@ -1392,7 +1397,7 @@ async def comment_now(channel: str):
         
         entity = None
         
-        # Получаем/вступаем в канал
+        # Получ��ем/вступаем в канал
         try:
             if normalized.startswith('+'):
                 # Приватный канал
