@@ -249,6 +249,35 @@
         <textarea rows="6" data-setting="comment_prompt"></textarea>
       </div>
 
+      <h3 class="section-h3">Комментинг</h3>
+      <div class="toggle-group">
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <div class="toggle-title">Быстрый режим (заглушка → редактирование)</div>
+            <div class="toggle-desc">Мгновенно кидает заглушку «_», чтобы быть первым, затем редактирует её в текст нейронки.</div>
+          </div>
+          <label class="switch"><input type="checkbox" data-setting="quick_comment_mode"/><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <div class="toggle-title">Комментить от имени группы</div>
+            <div class="toggle-desc">Писать комменты от имени канала (send as). Аккаунт должен быть админом канала. Если нельзя — пишет от личного аккаунта.</div>
+          </div>
+          <label class="switch"><input type="checkbox" data-setting="comment_as_channel"/><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="form-grid-2" style="margin-top:16px">
+        <div class="form-row">
+          <label>Быстрый режим: макс. возраст поста (мин)</label>
+          <input type="number" min="1" max="120" data-setting="quick_comment_max_age_minutes" />
+        </div>
+        <div class="form-row">
+          <label>Канал для «от имени группы» (@username)</label>
+          <input type="text" data-setting="comment_as_channel_username" placeholder="@my_channel" />
+        </div>
+      </div>
+
       <div class="form-grid-2">
         <div class="form-row">
           <label>Макс. возраст поста (часы)</label>

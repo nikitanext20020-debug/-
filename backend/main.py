@@ -648,6 +648,9 @@ async def get_settings():
         "warmup_mode": db.get_setting("warmup_mode", False),  # Режим прогрева для новых аккаунтов
         "quick_comment_mode": db.get_setting("quick_comment_mode", False),  # Быстрый коммент + редактирование
         "quick_comment_max_age_minutes": db.get_setting("quick_comment_max_age_minutes", 5),  # Макс возраст поста для быстрого режима
+        # Комментить от имени канала/группы (send_as)
+        "comment_as_channel": db.get_setting("comment_as_channel", False),
+        "comment_as_channel_username": db.get_setting("comment_as_channel_username", ""),
         # Новые настройки
         "max_post_age_hours": db.get_setting("max_post_age_hours", 12),
         "comment_delay_min": db.get_setting("comment_delay_min", 1),
@@ -684,8 +687,11 @@ class SettingsUpdate(BaseModel):
     work_mode: Optional[str] = None
     auto_night_mode: Optional[bool] = None
     warmup_mode: Optional[bool] = None  # Режим прогрева для новых аккаунтов
-    quick_comment_mode: Optional[bool] = None  # Быстрый коммент + редактирование
+    quick_comment_mode: Optional[bool] = None  # Быстрый ��оммент + редактирование
     quick_comment_max_age_minutes: Optional[int] = None  # Макс возраст поста для быстрого режима (минуты)
+    # Комментить от имени канала/группы (send_as)
+    comment_as_channel: Optional[bool] = None
+    comment_as_channel_username: Optional[str] = None
     # Новые настройки
     max_post_age_hours: Optional[int] = None
     comment_delay_min: Optional[int] = None
@@ -1854,7 +1860,7 @@ async def get_stats_24h():
 @app.post("/admin/clear-stats")
 async def clear_all_stats():
     """
-    Полностью очищает статистику: комментарии, лайки, логи.
+    Полно��тью очищает статистику: комментарии, лайки, логи.
     Использовать, если данные устарели или нужно начать с чистого листа.
     """
     try:
@@ -1956,7 +1962,7 @@ async def bulk_update_profiles(data: BulkProfileUpdate):
     """
     from modules.profile_manager import ProfileManager
     
-    # Определяем какие аккаунты обновлять
+    # Определя��м какие аккаунты обновлять
     if data.account_ids:
         target_ids = data.account_ids
     else:
