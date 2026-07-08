@@ -376,90 +376,137 @@ document.getElementById('form-import-session').addEventListener('submit', async 
   }
 });
 
-// ============ SETTINGS / TOGGLES (общая логика) ============
-const Settings = {
-  current: {},
-  async load() {
-    try {
-      this.current = await API.get('/settings');
-    } catch (e) {
-      toast(`Не удалось загрузить настройки: ${e.message}`, 'error');
-      return;
-    }
-    // распихиваем значения по всем элементам [data-setting]
-    for (const el of document.querySelectorAll('[data-setting]')) {
-      const k = el.dataset.setting;
-      if (!(k in this.current)) continue;
-      const v = this.current[k];
-      if (el.type === 'checkbox') el.checked = !!v;
-      else if (el.tagName === 'SELECT' || el.type === 'text' || el.type === 'password' ||
-               el.type === 'number' || el.tagName === 'TEXTAREA') {
-        el.value = v == null ? '' : v;
-      }
-    }
-    // Глобальная пауза в топбаре
-    document.getElementById('global-pause-toggle').checked = !!this.current.global_pause;
-    document.getElementById('m-pause').textContent = this.current.global_pause ? 'ВКЛ' : 'выкл';
-    document.getElementById('ch-watcher-int').textContent = this.current.channel_watcher_interval_minutes || 30;
+// ---- Переключение режимов добавления: .session / номер ----
+const PhoneAuth = {
+  phone: '',
+  reset() {
+    document.getElementById('form-phone-step1')?.classList.remove('hidden');
+    document.getElementById('form-phone-step2')?.classList.add('hidden');
+    document.getElementById('form-phone-step3')?.classList.add('hidden');
+    document.getElementById('form-phone-step1')?.reset();
+    document.getElementById('form-phone-step2')?.reset();
+    document.getElementById('form-phone-step3')?.reset();
   },
-  async save(diff) {
+  show(step) {
+    document.getElementById('form-phone-step1').classList.toggle('hidden', step !== 1);
+    document.getElementById('form-phone-step2').classList.toggle('hidden', step !== 2);
+    document.getElementById('form-phone-step3').classList.toggle('hidden', step !== 3);
+  },
+  async fillProxies() {
+    const sel = document.getElementById('phone-proxy-select');
+    if (!sel) return;
     try {
-      await API.post('/settings', diff);
-      this.current = { ...this.current, ...diff };
-      const hint = document.getElementById('behavior-saved-hint');
-      if (hint) {
-        hint.textContent = '✓ Сохранено';
-        clearTimeout(this._h);
-        this._h = setTimeout(() => hint.textContent = '', 1800);
-      }
-    } catch (e) {
-      toast(`Сохранение: ${e.message}`, 'error');
-    }
+      const proxies = await API.get('/proxies');
+      sel.innerHTML = '<option value="">Без прокси</option>' +
+        proxies.map(p => `<option value="${p.id}">${escape((p.type || 'http').toUpperCase())} ${escape(p.ip)}:${escape(String(p.port))}</option>`).join('');
+    } catch { /* необязательно */ }
   },
 };
 
-// чекбоксы → автосейв при изменении
-document.addEventListener('change', async (e) => {
-  const el = e.target;
-  if (!el.matches('[data-setting]')) return;
-  if (el.type !== 'checkbox') return;
-  const k = el.dataset.setting;
-  await Settings.save({ [k]: el.checked });
+document.querySelectorAll('.modal-switch-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.modal-switch-btn').forEach(b => b.classList.toggle('active', b === btn));
+    const mode = btn.dataset.mode;
+    document.getElementById('mode-session').classList.toggle('hidden', mode !== 'session');
+    document.getElementById('mode-phone').classList.toggle('hidden', mode !== 'phone');
+    if (mode === 'phone') { PhoneAuth.reset(); PhoneAuth.fillProxies(); }
+  });
 });
 
-// глобальная пауза
-document.getElementById('global-pause-toggle').addEventListener('change', async (e) => {
-  await Settings.save({ global_pause: e.target.checked });
-  document.getElementById('m-pause').textContent = e.target.checked ? 'ВКЛ' : 'выкл';
-});
-
-// кнопка Сохранить (для текстовых полей и select'ов)
-document.getElementById('btn-save-settings').addEventListener('click', async () => {
-  const diff = {};
-  for (const el of document.querySelectorAll('#tab-settings [data-setting]')) {
-    const k = el.dataset.setting;
-    if (el.type === 'checkbox') diff[k] = el.checked;
-    else if (el.type === 'number') diff[k] = el.value === '' ? null : Number(el.value);
-    else diff[k] = el.value;
-  }
-  // фильтруем null
-  for (const k in diff) if (diff[k] === null || diff[k] === undefined) delete diff[k];
-  await Settings.save(diff);
-  toast('Настройки сохранены', 'ok');
-});
-
-// тест нейросети
-document.getElementById('btn-test-ai').addEventListener('click', async () => {
-  const out = document.getElementById('settings-test-result');
-  out.innerHTML = '<span class="muted">Проверяю…</span>';
+// Прячем ручные API-поля в режиме номера, если ключи уже заданы
+(async () => {
   try {
-    const r = await API.post('/settings/test-ai');
-    if (r.status === 'ok') out.innerHTML = `<span class="pill good">${escape(r.message)}</span> <span class="muted small">${escape(r.reply || '')}</span>`;
-    else                   out.innerHTML = `<span class="pill bad">${escape(r.message)}</span>`;
-  } catch (e) {
-    out.innerHTML = `<span class="pill bad">Ошибка: ${escape(e.message)}</span>`;
+    const cfg = await API.get('/config-status');
+    if (cfg && cfg.api_configured) {
+      document.getElementById('phone-api-fields')?.classList.add('hidden');
+      document.getElementById('phone-api-note')?.classList.remove('hidden');
+    }
+  } catch (_) { /* необязательно */ }
+})();
+
+// Шаг 1 — отправка кода
+document.getElementById('form-phone-step1').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const phone = (f.phone.value || '').trim();
+  if (!phone) { toast('Укажите номер', 'error'); return; }
+  const body = { phone };
+  const proxyId = f.proxy_id.value;
+  if (proxyId) body.proxy_id = Number(proxyId);
+  if (f.api_id.value) body.api_id = Number(f.api_id.value);
+  if ((f.api_hash.value || '').trim()) body.api_hash = f.api_hash.value.trim();
+
+  const submitBtn = f.querySelector('button[type="submit"]');
+  submitBtn.disabled = true; submitBtn.textContent = 'Отправка…';
+  try {
+    const r = await API.post('/auth/send-code', body);
+    PhoneAuth.phone = phone;
+    PhoneAuth.hash = r.phone_code_hash;
+    document.getElementById('phone-display').textContent = phone;
+    toast('Код отправлен в Telegram', 'ok');
+    PhoneAuth.show(2);
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    submitBtn.disabled = false; submitBtn.textContent = 'Отправить код';
   }
 });
+
+document.getElementById('phone-back-1').addEventListener('click', () => PhoneAuth.show(1));
+
+// Шаг 2 — проверка кода
+document.getElementById('form-phone-step2').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const code = (e.target.code.value || '').trim();
+  if (!code) { toast('Введите код', 'error'); return; }
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true; submitBtn.textContent = 'Проверка…';
+  try {
+    const r = await API.post('/auth/verify-code', {
+      phone: PhoneAuth.phone, code, phone_code_hash: PhoneAuth.hash,
+    });
+    if (r.status === 'password_required') {
+      toast('Нужен пароль 2FA', 'ok');
+      PhoneAuth.show(3);
+    } else {
+      await PhoneAuth.finish();
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    submitBtn.disabled = false; submitBtn.textContent = 'Подтвердить';
+  }
+});
+
+// Шаг 3 — пароль 2FA
+document.getElementById('form-phone-step3').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const password = e.target.password.value || '';
+  if (!password) { toast('Введите пароль', 'error'); return; }
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true; submitBtn.textContent = 'Вход…';
+  try {
+    await API.post('/auth/verify-password', { phone: PhoneAuth.phone, password });
+    await PhoneAuth.finish();
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    submitBtn.disabled = false; submitBtn.textContent = 'Войти';
+  }
+});
+
+// Завершение: сохраняем сессию как аккаунт
+PhoneAuth.finish = async function () {
+  try {
+    await API.post('/accounts', { phone: this.phone });
+    toast('Аккаунт добавлен', 'ok');
+    modal.classList.add('hidden');
+    this.reset();
+    Accounts.refresh();
+  } catch (err) {
+    toast('Авторизация прошла, но сохранить не удалось: ' + err.message, 'error');
+  }
+};
 
 // ============ CHANNELS ============
 const Channels = {

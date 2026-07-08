@@ -841,6 +841,23 @@ input:disabled + .slider { opacity: 0.5; cursor: not-allowed; }
 
 .mono { font-family: var(--mono); }
 
+/* ============== MODAL MODE SWITCH ============== */
+.modal-switch {
+  display: flex; gap: 4px; padding: 4px;
+  background: var(--bg-1); border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm); margin-bottom: 16px;
+}
+.modal-switch-btn {
+  flex: 1; padding: 9px 12px; font-size: 13px; font-family: var(--font);
+  color: var(--text-dim); background: transparent;
+  border: none; border-radius: var(--radius-xs); cursor: pointer;
+  transition: all .15s ease;
+}
+.modal-switch-btn:hover { color: var(--text); }
+.modal-switch-btn.active { background: var(--accent); color: var(--bg-0); font-weight: 600; }
+.auth-actions { flex-direction: row; gap: 8px; }
+.auth-actions .btn { flex: 1; }
+
 /* ============== CHANNEL ADD BAR / PROXY FORM ============== */
 .channel-add-bar {
   display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;

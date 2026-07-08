@@ -217,14 +217,14 @@ SERVER_STARTUP_TIME = datetime.now(msk_tz).strftime('%Y-%m-%d %H:%M:%S')
 
 class AccountCreate(BaseModel):
     phone: str
-    api_id: int
-    api_hash: str
+    api_id: Optional[int] = None
+    api_hash: Optional[str] = None
     session_name: Optional[str] = None
 
 class CodeSendRequest(BaseModel):
     phone: str
-    api_id: int
-    api_hash: str
+    api_id: Optional[int] = None
+    api_hash: Optional[str] = None
     proxy_id: Optional[int] = None  # ID прокси для безопасной авторизации
 
 class CodeVerifyRequest(BaseModel):
@@ -261,7 +261,12 @@ async def send_code(req: CodeSendRequest):
     valid, error = InputValidator.validate_phone(req.phone)
     if not valid:
         raise HTTPException(status_code=400, detail=error)
-    
+
+    # Резолвим API ID/Hash: ручной ввод -> БД -> 1.envv
+    api_id, api_hash = _resolve_api_credentials(req.api_id, req.api_hash)
+    if not api_id or not api_hash:
+        raise HTTPException(status_code=400, detail="Не заданы API ID / Hash. Укажите их или пропишите в 1.envv")
+
     try:
         # --- ЛОГИКА ПРОКСИ ---
         proxy_tuple = None
@@ -277,7 +282,7 @@ async def send_code(req: CodeSendRequest):
                     proxy_tuple = (p_type, p['ip'], p['port'], True, p['username'], p['password'])
         
         # Отправляем код С ПРОКСИ (или без, если proxy_id=None)
-        hash = await auth.send_code(req.phone, req.api_id, req.api_hash, proxy_tuple, req.proxy_id)
+        hash = await auth.send_code(req.phone, api_id, api_hash, proxy_tuple, req.proxy_id)
         return {"phone_code_hash": hash}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -300,11 +305,14 @@ async def verify_password(req: PasswordVerifyRequest):
 
 @app.post("/accounts")
 async def add_account(account: AccountCreate):
+    # Резолвим API ID/Hash: ручной ввод -> БД -> 1.envv
+    api_id, api_hash = _resolve_api_credentials(account.api_id, account.api_hash)
+
     # Валидация входных данных
     valid, error = InputValidator.validate_account_data(
         account.phone, 
-        account.api_id, 
-        account.api_hash
+        api_id, 
+        api_hash
     )
     if not valid:
         raise HTTPException(status_code=400, detail=error)
@@ -318,7 +326,7 @@ async def add_account(account: AccountCreate):
         proxy_id = await auth.finish_auth(account.phone, session_name)
         
         # Добавляем аккаунт с proxy_id
-        acc_id = db.add_account(account.phone, session_name, account.api_id, account.api_hash)
+        acc_id = db.add_account(account.phone, session_name, api_id, api_hash)
         
         # Если был использован прокси, привязываем его к аккаунту
         if proxy_id:
@@ -700,7 +708,7 @@ class ProxyAssign(BaseModel):
 
 @app.post("/accounts/{acc_id}/proxy")
 async def assign_proxy(acc_id: int, data: ProxyAssign):
-    """Привязывает или отвязывает прокси от аккаунта"""
+    """Привязывает и��и отвязывает прокси от аккаунта"""
     accounts = db.get_accounts()
     account = next((a for a in accounts if a['id'] == acc_id), None)
     if not account:
@@ -1394,7 +1402,7 @@ async def comment_now(channel: str):
                 if saved_channel_id:
                     try:
                         entity = await worker.client.get_entity(saved_channel_id)
-                        print(f"[comment-now] acc:{acc_id} Нашли канал по ID: {saved_channel_id}")
+                        print(f"[comment-now] acc:{acc_id} Нашли ка��ал по ID: {saved_channel_id}")
                     except:
                         pass
                 
@@ -1873,7 +1881,7 @@ async def export_stats(account_id: int, days: int = 7):
         account_id: ID аккаунта
         days: Количество дней для выборки (по умолчанию 7)
     """
-    # Проверяем существование аккаунта
+    # Проверяем существовани�� аккаунта
     accounts = db.get_accounts()
     account = next((a for a in accounts if a['id'] == account_id), None)
     if not account:

@@ -465,25 +465,79 @@
   <div class="modal-card">
     <header><h3>Добавить аккаунты</h3><button class="modal-close">×</button></header>
     <div class="modal-body">
-      <p class="muted">Загрузите готовые <code>.session</code> файлы Telethon. Номер телефона определяется из имени файла — вводить ничего не нужно.</p>
-      <form id="form-import-session">
-        <div class="form-row"><label>.session файлы (можно несколько)</label>
-          <input type="file" name="files" accept=".session" multiple required /></div>
 
-        <div id="api-fields-note" class="form-row hidden">
-          <p class="muted small">API ID / Hash уже сохранены — поля можно не заполнять.</p>
-        </div>
+      <div class="modal-switch">
+        <button type="button" class="modal-switch-btn active" data-mode="session">По .session файлу</button>
+        <button type="button" class="modal-switch-btn" data-mode="phone">По номеру телефона</button>
+      </div>
 
-        <details id="api-fields" class="api-details">
-          <summary>API ID / Hash (необязательно)</summary>
-          <div class="form-row"><label>API ID</label>
-            <input type="number" name="api_id" placeholder="12345"/></div>
-          <div class="form-row"><label>API Hash</label>
-            <input type="text" name="api_hash" minlength="32" maxlength="32" placeholder="оставьте пустым, если задано в 1.envv"/></div>
-        </details>
+      <!-- Режим: импорт .session -->
+      <div id="mode-session">
+        <p class="muted">Загрузите готовые <code>.session</code> файлы Telethon. Номер телефона определяется из имени файла — вводить ничего не нужно.</p>
+        <form id="form-import-session">
+          <div class="form-row"><label>.session файлы (можно несколько)</label>
+            <input type="file" name="files" accept=".session" multiple required /></div>
 
-        <div class="form-row"><button class="btn btn-primary" type="submit">Импортировать</button></div>
-      </form>
+          <div id="api-fields-note" class="form-row hidden">
+            <p class="muted small">API ID / Hash уже сохранены — поля можно не заполнять.</p>
+          </div>
+
+          <details id="api-fields" class="api-details">
+            <summary>API ID / Hash (необязательно)</summary>
+            <div class="form-row"><label>API ID</label>
+              <input type="number" name="api_id" placeholder="12345"/></div>
+            <div class="form-row"><label>API Hash</label>
+              <input type="text" name="api_hash" minlength="32" maxlength="32" placeholder="оставьте пустым, если задано в 1.envv"/></div>
+          </details>
+
+          <div class="form-row"><button class="btn btn-primary" type="submit">Импортировать</button></div>
+        </form>
+      </div>
+
+      <!-- Режим: вход по номеру -->
+      <div id="mode-phone" class="hidden">
+        <!-- Шаг 1: номер -->
+        <form id="form-phone-step1" class="auth-step">
+          <p class="muted">Telegram отправит код подтверждения в приложение на этот номер.</p>
+          <div class="form-row"><label>Номер телефона</label>
+            <input type="tel" name="phone" placeholder="+79991234567" required /></div>
+          <div class="form-row"><label>Прокси (рекомендуется)</label>
+            <select name="proxy_id" id="phone-proxy-select"><option value="">Без прокси</option></select></div>
+
+          <div id="phone-api-note" class="form-row hidden">
+            <p class="muted small">API ID / Hash уже сохранены — поля можно не заполнять.</p>
+          </div>
+          <details id="phone-api-fields" class="api-details">
+            <summary>API ID / Hash (необязательно)</summary>
+            <div class="form-row"><label>API ID</label>
+              <input type="number" name="api_id" placeholder="12345"/></div>
+            <div class="form-row"><label>API Hash</label>
+              <input type="text" name="api_hash" minlength="32" maxlength="32" placeholder="оставьте пустым, если задано в 1.envv"/></div>
+          </details>
+
+          <div class="form-row"><button class="btn btn-primary" type="submit">Отправить код</button></div>
+        </form>
+
+        <!-- Шаг 2: код -->
+        <form id="form-phone-step2" class="auth-step hidden">
+          <p class="muted">Введите код из Telegram для <b id="phone-display"></b>.</p>
+          <div class="form-row"><label>Код подтверждения</label>
+            <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="12345" required /></div>
+          <div class="form-row auth-actions">
+            <button class="btn btn-ghost" type="button" id="phone-back-1">Назад</button>
+            <button class="btn btn-primary" type="submit">Подтвердить</button>
+          </div>
+        </form>
+
+        <!-- Шаг 3: пароль 2FA -->
+        <form id="form-phone-step3" class="auth-step hidden">
+          <p class="muted">Аккаунт защищён облачным паролем (2FA). Введите его.</p>
+          <div class="form-row"><label>Пароль 2FA</label>
+            <input type="password" name="password" placeholder="••••••" required /></div>
+          <div class="form-row"><button class="btn btn-primary" type="submit">Войти</button></div>
+        </form>
+      </div>
+
     </div>
   </div>
 </div>
