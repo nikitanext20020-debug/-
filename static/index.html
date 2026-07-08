@@ -391,18 +391,25 @@
 <!-- ADD ACCOUNT MODAL -->
 <div id="modal-add-account" class="modal hidden">
   <div class="modal-card">
-    <header><h3>Добавить аккаунт</h3><button class="modal-close">×</button></header>
+    <header><h3>Добавить аккаунты</h3><button class="modal-close">×</button></header>
     <div class="modal-body">
-      <p class="muted">Импортируйте готовый <code>.session</code> файл Telethon.</p>
+      <p class="muted">Загрузите готовые <code>.session</code> файлы Telethon. Номер телефона определяется из имени файла — вводить ничего не нужно.</p>
       <form id="form-import-session">
-        <div class="form-row"><label>Телефон (international, +XXXXX)</label>
-          <input type="tel" name="phone" required placeholder="+15551234567"/></div>
-        <div class="form-row"><label>API ID</label>
-          <input type="number" name="api_id" required placeholder="12345"/></div>
-        <div class="form-row"><label>API Hash</label>
-          <input type="text" name="api_hash" required minlength="32" maxlength="32" /></div>
-        <div class="form-row"><label>.session файл</label>
-          <input type="file" name="file" accept=".session" required /></div>
+        <div class="form-row"><label>.session файлы (можно несколько)</label>
+          <input type="file" name="files" accept=".session" multiple required /></div>
+
+        <div id="api-fields-note" class="form-row hidden">
+          <p class="muted small">API ID / Hash взяты из <code>1.envv</code> — поля можно не заполнять.</p>
+        </div>
+
+        <details id="api-fields" class="api-details">
+          <summary>API ID / Hash (необязательно)</summary>
+          <div class="form-row"><label>API ID</label>
+            <input type="number" name="api_id" placeholder="12345"/></div>
+          <div class="form-row"><label>API Hash</label>
+            <input type="text" name="api_hash" minlength="32" maxlength="32" placeholder="оставьте пустым, если задано в 1.envv"/></div>
+        </details>
+
         <div class="form-row"><button class="btn btn-primary" type="submit">Импортировать</button></div>
       </form>
     </div>

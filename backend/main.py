@@ -332,21 +332,41 @@ async def add_account(account: AccountCreate):
 @app.post("/import-session")
 async def import_session(
     file: UploadFile = File(...),
-    phone: str = Form(...),
-    api_id: int = Form(...),
-    api_hash: str = Form(...)
+    phone: Optional[str] = Form(None),
+    api_id: Optional[int] = Form(None),
+    api_hash: Optional[str] = Form(None)
 ):
-    """Импорт готового .session файла"""
+    """
+    Импорт готового .session файла.
+    phone / api_id / api_hash — опциональны:
+      - phone берётся из имени файла, если не указан;
+      - api_id / api_hash берутся из глобального конфига (1.envv), если не указаны.
+    Так для готовой сессии достаточно просто загрузить файл.
+    """
     # Валидация
     if not file.filename.endswith('.session'):
         raise HTTPException(status_code=400, detail="Файл должен быть .session")
-    
-    valid, error = InputValidator.validate_account_data(phone, api_id, api_hash)
-    if not valid:
-        raise HTTPException(status_code=400, detail=error)
-    
+
+    # Телефон: если не задан — извлекаем из имени файла
+    if not phone or not phone.strip():
+        raw = file.filename.replace('.session', '').replace('session_', '').replace('session', '')
+        digits = ''.join(filter(str.isdigit, raw))
+        phone = ('+' + digits) if len(digits) >= 10 else (raw or file.filename.replace('.session', ''))
+
+    # API-ключи: fallback на глобальный конфиг
+    if not api_id:
+        api_id = Config.API_ID
+    if not api_hash or not str(api_hash).strip():
+        api_hash = Config.API_HASH
+
+    if not api_id or not api_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Не заданы API ID / API Hash. Укажите их в форме или пропишите Api_id/Api_hash в 1.envv."
+        )
+
     # Формируем имя сессии
-    clean_phone = phone.replace('+', '').replace(' ', '')
+    clean_phone = str(phone).replace('+', '').replace(' ', '')
     session_name = f"session_{clean_phone}"
     sessions_dir = SESSIONS_DIR
     session_path = os.path.join(sessions_dir, f"{session_name}.session")
@@ -374,10 +394,26 @@ async def import_session(
 @app.post("/import-sessions-bulk")
 async def import_sessions_bulk(
     files: List[UploadFile] = File(...),
-    api_id: int = Form(...),
-    api_hash: str = Form(...)
+    api_id: Optional[int] = Form(None),
+    api_hash: Optional[str] = Form(None)
 ):
-    """Массовый импорт .session файлов"""
+    """
+    Массовый импорт .session файлов.
+    api_id / api_hash опциональны — если не заданы, берутся из 1.envv.
+    Телефон извлекается из имени каждого файла.
+    """
+    # API-ключи: fallback на глобальный конфиг
+    if not api_id:
+        api_id = Config.API_ID
+    if not api_hash or not str(api_hash).strip():
+        api_hash = Config.API_HASH
+
+    if not api_id or not api_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Не заданы API ID / API Hash. Укажите их в форме или пропишите Api_id/Api_hash в 1.envv."
+        )
+
     results = []
     sessions_dir = SESSIONS_DIR
     os.makedirs(sessions_dir, exist_ok=True)
@@ -2431,7 +2467,7 @@ async def get_campaigns(acc_id: int):
 
 @app.get("/accounts/{acc_id}/mass-send/campaigns/{campaign_id}/stats")
 async def get_campaign_stats_api(acc_id: int, campaign_id: int):
-    """Получает статистику кампании"""
+    """Получает статистику камп��нии"""
     return db.get_campaign_stats(campaign_id)
 
 
@@ -2624,3 +2660,10 @@ async def favicon():
 async def auth_status():
     """Сообщает фронту, нужна ли авторизация (для login-формы)."""
     return {"auth_required": bool(DASHBOARD_TOKEN)}
+
+
+@app.get("/config-status")
+async def config_status():
+    """Сообщает фронту, заданы ли глобальные API ID/Hash (из 1.envv).
+    Если да — при импорте сессий не нужно вводить их вручную."""
+    return {"api_configured": bool(Config.API_ID and Config.API_HASH)}

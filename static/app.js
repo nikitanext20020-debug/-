@@ -208,15 +208,40 @@ const modal = document.getElementById('modal-add-account');
 document.getElementById('btn-add-account').addEventListener('click', () => modal.classList.remove('hidden'));
 modal.querySelector('.modal-close').addEventListener('click', () => modal.classList.add('hidden'));
 modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+
+// Если API ID/Hash заданы глобально в 1.envv — прячем ручные поля, показываем подсказку
+(async () => {
+  try {
+    const cfg = await API.get('/config-status');
+    if (cfg && cfg.api_configured) {
+      document.getElementById('api-fields')?.classList.add('hidden');
+      document.getElementById('api-fields-note')?.classList.remove('hidden');
+    }
+  } catch (_) { /* необязательно */ }
+})();
+
 document.getElementById('form-import-session').addEventListener('submit', async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
+  // Убираем пустые API-поля, чтобы сработал fallback на 1.envv
+  if (!fd.get('api_id')) fd.delete('api_id');
+  if (!(fd.get('api_hash') || '').trim()) fd.delete('api_hash');
+  const fileCount = (fd.getAll('files') || []).filter((f) => f && f.name).length;
+  if (!fileCount) { toast('Выберите хотя бы один .session файл', 'error'); return; }
   try {
-    await API.upload('/import-session', fd);
-    toast('Сессия импортирована', 'ok');
-    modal.classList.add('hidden');
-    e.target.reset();
-    Accounts.refresh();
+    const res = await API.upload('/import-sessions-bulk', fd);
+    const ok = res.success || 0;
+    const skipped = (res.results || []).filter((r) => r.status === 'skip').length;
+    const failed = (res.results || []).filter((r) => r.status === 'error').length;
+    let msg = `Импортировано: ${ok} из ${res.total || fileCount}`;
+    if (skipped) msg += `, пропущено: ${skipped}`;
+    if (failed) msg += `, ошибок: ${failed}`;
+    toast(msg, failed && !ok ? 'error' : 'ok');
+    if (ok) {
+      modal.classList.add('hidden');
+      e.target.reset();
+      Accounts.refresh();
+    }
   } catch (err) {
     toast(err.message, 'error');
   }
