@@ -220,7 +220,7 @@ const Accounts = {
         toast('Воркер запущен', 'ok');
       } else if (act === 'stop') {
         await API.post(`/accounts/${id}/stop`);
-        toast('Воркер остановлен', 'ok');
+        toast('Воркер ост��новлен', 'ok');
       } else if (act === 'delete') {
         if (!confirm('Удалить аккаунт?')) return;
         await API.del(`/accounts/${id}`);
@@ -720,31 +720,110 @@ document.getElementById('btn-check-proxy').addEventListener('click', async () =>
 // ============ LOGS ============
 const Logs = {
   _timer: null,
+  _last: [],
+  _accountsFilled: false,
+
+  accLabel(l) {
+    if (l.account_id == null) return 'sys';
+    if (l.phone) return l.phone;
+    return 'acc:' + l.account_id;
+  },
+
+  fillAccounts() {
+    const sel = document.getElementById('logs-account');
+    if (!sel) return;
+    const prev = sel.value;
+    const accs = Accounts.data || [];
+    sel.innerHTML = '<option value="">Все аккаунты</option>' +
+      accs.map(a => `<option value="${a.id}">${escape(a.phone || ('acc ' + a.id))}</option>`).join('');
+    if (prev) sel.value = prev;
+    this._accountsFilled = true;
+  },
+
+  async refreshSummary() {
+    try {
+      const counts = await API.get('/logs/summary?hours=24');
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v || 0; };
+      set('lb-success', counts.success);
+      set('lb-info', counts.info);
+      set('lb-warning', counts.warning);
+      set('lb-error', counts.error);
+    } catch { /* ignore */ }
+  },
+
   async refresh() {
     const c = document.getElementById('logs-container');
+    if (!this._accountsFilled) this.fillAccounts();
     const lvl = document.getElementById('logs-level').value;
+    const search = (document.getElementById('logs-search').value || '').trim();
+    const acc = document.getElementById('logs-account').value;
+
+    // Сохраняем позицию скролла, чтобы автообновление не дёргало чтение
+    const atTop = c.scrollTop <= 8;
+    const prevScroll = c.scrollTop;
+
     try {
       const params = new URLSearchParams();
       if (lvl) params.set('level', lvl);
-      params.set('limit', '300');
+      if (search) params.set('search', search);
+      if (acc) params.set('account_id', acc);
+      params.set('limit', '400');
       const data = await API.get('/logs?' + params.toString());
       const list = Array.isArray(data) ? data : (data.logs || []);
-      if (!list.length) { c.textContent = '— пусто —'; return; }
-      c.innerHTML = list.map(l => {
+      this._last = list;
+      this.refreshSummary();
+
+      if (!list.length) { c.innerHTML = '<div class="logs-empty">— нет записей по фильтру —</div>'; return; }
+
+      c.innerHTML = list.map((l, i) => {
         const ts = (l.timestamp || '').slice(11, 19) || '--:--:--';
-        const level = (l.level || 'info').toLowerCase();
-        const acc = l.account_id != null ? `acc:${l.account_id}` : 'sys';
-        return `<div class="log-line">
-          <span class="log-time">${escape(ts)}</span>
-          <span class="log-level ${escape(level)}">${escape(level)}</span>
+        const date = (l.timestamp || '').slice(0, 10);
+        let level = (l.level || 'info').toLowerCase();
+        if (!['success', 'info', 'warning', 'error', 'debug', 'critical'].includes(level)) level = 'info';
+        const acc = this.accLabel(l);
+        const mod = l.module ? `<span class="log-mod">${escape(l.module)}</span>` : '';
+        const trace = l.stack_trace
+          ? `<details class="log-trace"><summary>stack trace</summary><pre>${escape(l.stack_trace)}</pre></details>`
+          : '';
+        return `<div class="log-line ${level}">
+          <span class="log-time" title="${escape(date + ' ' + ts)}">${escape(ts)}</span>
+          <span class="log-level ${level}">${escape(level)}</span>
           <span class="log-acc">${escape(acc)}</span>
-          <span class="log-msg">${escape(l.message || '')}</span>
+          <span class="log-msg">${escape(l.message || '')}${mod}${trace}</span>
         </div>`;
       }).join('');
+
+      // Восстанавливаем скролл: если были вверху (смотрим новые) — остаёмся вверху
+      c.scrollTop = atTop ? 0 : prevScroll;
     } catch (e) {
-      c.textContent = `Ошибка: ${e.message}`;
+      c.innerHTML = `<div class="logs-empty">Ошибка: ${escape(e.message)}</div>`;
     }
   },
+
+  toText() {
+    return (this._last || []).map(l =>
+      `[${(l.timestamp || '').slice(0, 19)}] [${(l.level || 'info').toUpperCase()}] [${this.accLabel(l)}] ${l.message || ''}` +
+      (l.stack_trace ? `\n${l.stack_trace}` : '')
+    ).join('\n');
+  },
+
+  async copy() {
+    try {
+      await navigator.clipboard.writeText(this.toText());
+      toast('Логи скопированы', 'ok');
+    } catch { toast('Не удалось скопировать', 'error'); }
+  },
+
+  download() {
+    const blob = new Blob([this.toText()], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `neurocore-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
   startAuto() {
     this.stopAuto();
     this._timer = setInterval(() => this.refresh(), 4000);
@@ -756,8 +835,25 @@ const Logs = {
 };
 document.getElementById('btn-refresh-logs').addEventListener('click', () => Logs.refresh());
 document.getElementById('logs-level').addEventListener('change', () => Logs.refresh());
+document.getElementById('logs-account').addEventListener('change', () => Logs.refresh());
+document.getElementById('btn-copy-logs').addEventListener('click', () => Logs.copy());
+document.getElementById('btn-download-logs').addEventListener('click', () => Logs.download());
 document.getElementById('logs-autorefresh').addEventListener('change', (e) => {
   if (e.target.checked) Logs.startAuto(); else Logs.stopAuto();
+});
+// Дебаунс поиска
+let _logsSearchTimer = null;
+document.getElementById('logs-search').addEventListener('input', () => {
+  clearTimeout(_logsSearchTimer);
+  _logsSearchTimer = setTimeout(() => Logs.refresh(), 350);
+});
+// Клик по бейджу уровня — быстрый фильтр
+document.querySelectorAll('#logs-badges .log-badge').forEach(b => {
+  b.addEventListener('click', () => {
+    const sel = document.getElementById('logs-level');
+    sel.value = (sel.value === b.dataset.level) ? '' : b.dataset.level;
+    Logs.refresh();
+  });
 });
 
 // ============ HEADER STATUS ============

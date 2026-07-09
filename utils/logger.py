@@ -189,3 +189,28 @@ class StructuredLogger:
         self._logger.debug(formatted)
         # Debug логи не сохраняем в БД для экономии места
 
+    def success(self, message: str, account_id: Optional[int] = None, **extra):
+        """Логирует успешное действие (отдельный уровень для зелёной подсветки)"""
+        entry = self._create_entry("success", message, account_id, **extra)
+        formatted = self._format_message(message, account_id, **extra)
+        self._logger.info(formatted)
+        self._save_to_db(entry)
+
+    def log(self, level: str, message: str, account_id: Optional[int] = None,
+            exc_info: bool = False, **extra):
+        """
+        Универсальный метод: логирует сообщение с произвольным уровнем.
+        Гарантирует, что запись попадёт в БД, даже если уровень нестандартный.
+        """
+        level = (level or "info").lower()
+        entry = self._create_entry(level, message, account_id, exc_info=exc_info, **extra)
+        formatted = self._format_message(message, account_id, **extra)
+        # Маппинг на python-logging уровни для консоли
+        py_level = {"success": logging.INFO, "info": logging.INFO,
+                    "warning": logging.WARNING, "error": logging.ERROR,
+                    "critical": logging.CRITICAL, "debug": logging.DEBUG}.get(level, logging.INFO)
+        self._logger.log(py_level, formatted, exc_info=exc_info)
+        # debug не пишем в БД для экономии места
+        if level != "debug":
+            self._save_to_db(entry)
+

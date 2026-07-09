@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=5" />
+  <link rel="stylesheet" href="/static/style.css?v=7" />
 </head>
 <body>
 
@@ -150,7 +150,7 @@
             <span class="toggle-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>
             </span>
-            Писать спамботу при флуде
+            Писать с��амботу при флуде
           </div>
           <div class="toggle-desc">
             При <code>PeerFloodError</code> бот идёт в <b>@SpamBot</b>, отправляет <code>/start</code>,
@@ -423,7 +423,7 @@
         <form id="form-invite-start">
           <div class="form-row"><label>ID вашего канала/группы</label>
             <input type="number" name="channel_id" placeholder="-1001234567890" required /></div>
-          <div class="form-row"><label>Источник (@чат, необязательно — иначе берутся спарсенные)</label>
+          <div class="form-row"><label>Источник (@чат, необязательно — иначе берутся с��арсенные)</label>
             <input type="text" name="source_chat_id" placeholder="@somechat" /></div>
           <div class="form-row"><label>Дневной лимит</label>
             <input type="number" name="daily_limit" min="1" max="200" placeholder="50" /></div>
@@ -551,7 +551,7 @@
         <thead>
           <tr><th>Канал</th><th>Текст</th><th>Тип</th><th>Когда</th><th></th></tr>
         </thead>
-        <tbody id="comments-tbody"><tr><td colspan="5" class="empty">Загрузка…</td></tr></tbody>
+        <tbody id="comments-tbody"><tr><td colspan="5" class="empty">Загрузка��</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -744,20 +744,42 @@
     <div class="page-header">
       <h2>Логи</h2>
       <div class="page-actions">
-        <select id="logs-level">
-          <option value="">Все уровни</option>
-          <option value="info">info</option>
-          <option value="warning">warning</option>
-          <option value="error">error</option>
-        </select>
         <label class="checkbox-inline">
           <input type="checkbox" id="logs-autorefresh" checked />
           Автообновление
         </label>
+        <button class="btn btn-ghost" id="btn-copy-logs" title="Скопировать видимые логи">Копировать</button>
+        <button class="btn btn-ghost" id="btn-download-logs" title="Скачать логи в файл">Скачать</button>
         <button class="btn btn-ghost" id="btn-refresh-logs">Обновить</button>
       </div>
     </div>
-    <div id="logs-container" class="logs">Загрузка…</div>
+
+    <div class="logs-toolbar">
+      <div class="search-box logs-search">
+        <input type="search" id="logs-search" placeholder="Поиск по тексту лога…" />
+      </div>
+      <select id="logs-level" class="acc-select">
+        <option value="">Все уровни</option>
+        <option value="success">success</option>
+        <option value="info">info</option>
+        <option value="warning">warning</option>
+        <option value="error">error</option>
+        <option value="warning,error">warning + error</option>
+      </select>
+      <select id="logs-account" class="acc-select">
+        <option value="">Все аккаунты</option>
+      </select>
+    </div>
+
+    <div class="logs-badges" id="logs-badges">
+      <span class="log-badge success" data-level="success" title="Показать только success">✓ <b id="lb-success">0</b></span>
+      <span class="log-badge info" data-level="info" title="Показать только info">i <b id="lb-info">0</b></span>
+      <span class="log-badge warning" data-level="warning" title="Показать только warning">⚠ <b id="lb-warning">0</b></span>
+      <span class="log-badge error" data-level="error" title="Показать только error">✕ <b id="lb-error">0</b></span>
+      <span class="logs-hint muted small" id="logs-hint"></span>
+    </div>
+
+    <div id="logs-container" class="logs" aria-live="polite">Загрузка…</div>
   </section>
 
 </main>
@@ -886,6 +908,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=6"></script>
 </body>
 </html>

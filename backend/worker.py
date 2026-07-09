@@ -312,17 +312,23 @@ class BotWorker:
 
 
     def log(self, message: str, level: str = "info"):
-        """Логирует сообщение с привязкой к аккаунту (с fallback на консоль)"""
+        """Логирует сообщение с привязкой к аккаунту (с fallback на консоль).
+
+        Любой уровень гарантированно сохраняется в БД. Уровень 'info' с зелёной
+        галочкой в начале авто-повышается до 'success' для наглядной подсветки.
+        """
         try:
-            if level == "info":
-                self.logger.info(message, account_id=self.account_id)
-            elif level == "error":
+            lvl = (level or "info").lower()
+            # Авто-детект успешных действий по эмодзи-галочке в начале сообщения
+            if lvl == "info" and message.lstrip().startswith(("✅", "☑️", "🎉")):
+                lvl = "success"
+            if lvl == "error":
                 self.logger.error(message, account_id=self.account_id, exc_info=True)
-            elif level == "warning":
-                self.logger.warning(message, account_id=self.account_id)
+            else:
+                self.logger.log(lvl, message, account_id=self.account_id)
         except Exception as e:
             # Fallback на консоль если БД недоступна
-            print(f"[{level.upper()}][acc:{self.account_id}] {message} (log error: {e})")
+            print(f"[{str(level).upper()}][acc:{self.account_id}] {message} (log error: {e})")
 
     def _update_account_status(self, status: str):
         """Обновляет статус аккаунта в базе данных"""
@@ -580,7 +586,7 @@ class BotWorker:
 
     def _update_active_channels(self):
         """Обновляет список активных каналов из БД, исключая забаненные для этого аккаунта"""
-        # Получаем каналы из базы данных (только с открытыми комментами)
+        # Получаем каналы и�� базы данных (только с открытыми комментами)
         try:
             db_channels = self.db.get_found_channels(limit=500, only_open_comments=True)
             all_channels = [ch['channel'] for ch in db_channels]
@@ -940,7 +946,7 @@ class BotWorker:
                             break
                     else:
                         self.log(f"⚠️ Не удалось сгенерировать уникальный комментарий для {name}, пропускаю")
-                        # Если был быстрый коммент - удаляем заглушку
+                        # Если был быстрый коммен�� - удаляем заглушку
                         if quick_mode and result:
                             try:
                                 await self.client.delete_messages(channel, [result.id])
@@ -1331,7 +1337,7 @@ class BotWorker:
 {context}
 
 Напиши короткий естественный ответ на последнее сообщение. 
-Отвечай по теме обсуждения, как обычный участник чата.
+Отвечай по теме обсужде��ия, как обычный участник чата.
 Максимум 1-2 предложения."""
                     
                     # Используем специальный метод для чатов (без сохранения истории)
@@ -1600,7 +1606,7 @@ class BotWorker:
             if not all_channels:
                 return
             
-            # Получаем список каналов, в которых аккаунт уже состоит
+            # Получаем список каналов, в которых аккаунт уже сос��оит
             my_dialogs = set()
             try:
                 async for dialog in self.client.iter_dialogs(limit=300):
@@ -2005,7 +2011,7 @@ class BotWorker:
             
             async for dialog in self.client.iter_dialogs():
                 if not self.is_running: break
-                # Проверяем подключение в цикле
+                # Проверяем п��дключение в цикле
                 if not self.client.is_connected():
                     break
                 if isinstance(dialog.entity, Channel):

@@ -964,7 +964,8 @@ class Database:
         except Exception as e:
             print(f"[LOG FALLBACK] [{level}] {message} (Error: {e})")
 
-    def get_logs(self, limit: int = 100, account_id: Optional[int] = None, level: Optional[str] = None) -> List[Dict]:
+    def get_logs(self, limit: int = 100, account_id: Optional[int] = None,
+                 level: Optional[str] = None, search: Optional[str] = None) -> List[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             query = "SELECT l.*, a.phone FROM logs l LEFT JOIN accounts a ON l.account_id = a.id"
@@ -975,8 +976,17 @@ class Database:
                 conditions.append("l.account_id = ?")
                 params.append(account_id)
             if level:
-                conditions.append("l.level = ?")
-                params.append(level)
+                # Поддержка нескольких уровней через запятую: "warning,error"
+                levels = [x.strip() for x in str(level).split(",") if x.strip()]
+                if len(levels) == 1:
+                    conditions.append("l.level = ?")
+                    params.append(levels[0])
+                elif len(levels) > 1:
+                    conditions.append("l.level IN (%s)" % ",".join("?" * len(levels)))
+                    params.extend(levels)
+            if search:
+                conditions.append("l.message LIKE ?")
+                params.append(f"%{search}%")
             
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
@@ -986,15 +996,30 @@ class Database:
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_log_level_counts(self, hours: int = 24) -> Dict[str, int]:
+        """Возвращает количество логов по уровням за последние N часов (для бейджей)."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                msk_tz = timezone(timedelta(hours=3))
+                since = (datetime.now(msk_tz) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+                cursor.execute(
+                    "SELECT level, COUNT(*) AS c FROM logs WHERE timestamp >= ? GROUP BY level",
+                    (since,)
+                )
+                return {row["level"]: row["c"] for row in cursor.fetchall()}
+        except Exception:
+            return {}
+
     def cleanup_old_logs(self, days: int = 7) -> int:
         """
-        Удаляет логи старше указанного количества дней.
+        Удаляет логи старше указ��нного количества дней.
         
         Args:
             days: Количество дней (по умолчанию 7)
             
         Returns:
-            Количество удалённых записей
+            Количество удал��нных записей
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
