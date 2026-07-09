@@ -550,7 +550,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить профиль")
+            raise HTTPException(status_code=500, detail="Не удалось получить проф��ль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1346,7 +1346,7 @@ async def fix_private_channel_titles():
         # Небольшая задержка
         await asyncio.sleep(0.3)
     
-    print(f"[fix-titles] Готово! Исправлено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
+    print(f"[fix-titles] Готово! ��справлено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
     return {"status": "ok", "fixed": fixed, "skipped": skipped, "errors": errors, "total": len(private_channels)}
 
 @app.post("/discovery/channels/{channel}/comment-now")
@@ -1389,7 +1389,7 @@ async def comment_now(channel: str):
     ]
     
     async def send_comment_with_worker(acc_id, worker):
-        """Пытается отправить комментарий через конкретный воркер"""
+        """Пыт��ется отправить комментарий через конкретный воркер"""
         from telethon.tl.functions.messages import GetDiscussionMessageRequest
         from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest
         from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -1874,8 +1874,18 @@ async def reset_account_bans(account_id: int):
     return {"status": "added" if is_new else "updated", "channel": channel}
 
 @app.get("/logs")
-async def get_logs(limit: int = 50, account_id: Optional[int] = None):
-    return db.get_logs(limit=limit, account_id=account_id)
+async def get_logs(
+    limit: int = 50,
+    account_id: Optional[int] = None,
+    level: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    return db.get_logs(limit=limit, account_id=account_id, level=level, search=search)
+
+@app.get("/logs/summary")
+async def logs_summary(hours: int = 24):
+    """Счётчики логов по уровням за N часов — для бейджей в панели."""
+    return db.get_log_level_counts(hours=hours)
 
 @app.get("/stats/export")
 async def export_stats(account_id: int, days: int = 7):
@@ -1996,7 +2006,7 @@ async def clear_all_stats():
             cursor.execute("DELETE FROM processed_posts")
             posts_deleted = cursor.rowcount
             
-            # 6. Сбрасываем список банов для всех аккаунтов
+            # 6. Сбр��сываем список банов для всех аккаунтов
             cursor.execute("DELETE FROM channel_bans")
             bans_deleted = cursor.rowcount
             

@@ -6,7 +6,7 @@ from telethon.errors import (
     MessageIdInvalidError, FloodWaitError, UserAlreadyParticipantError,
     InviteHashExpiredError, ChannelPrivateError, UserDeactivatedBanError,
     AuthKeyUnregisteredError, ChatWriteForbiddenError, SlowModeWaitError,
-    PeerFloodError,
+    PeerFloodError, InviteRequestSentError,
 )
 import socks
 import time
@@ -106,6 +106,10 @@ class BotWorker:
         # Кэш вступленных групп обсуждений (чтобы не вступать повторно каждый цикл)
         self._joined_discussion_groups: set = set()
         
+        # Группы обсуждений, куда отправлена заявка и мы ждём одобрения админа.
+        # Пока linked_chat_id здесь — канал не банится, а периодически перепроверяется.
+        self._pending_discussion_groups: set = set()
+        
         # Кэш вступленных каналов в этой сессии (channel -> True)
         self._joined_channels: set = set()
         
@@ -148,13 +152,34 @@ class BotWorker:
         return (proxy_type, self.proxy_data['ip'], self.proxy_data['port'], True, 
                 self.proxy_data.get('proxy_user'), self.proxy_data.get('proxy_pass'))
 
-    async def _join_discussion_group_if_needed(self, linked_chat_id: int, channel_name: str) -> bool:
+    async def _join_discussion_group_if_needed(self, linked_chat_id: int, channel_name: str):
         """
         Вступает в группу обсуждений если ещё не вступали.
-        Возвращает True если вступили (или уже были), False при ошибке.
+
+        Возвращает:
+          - True      — вступили (или уже состоим);
+          - "pending" — группа с модерацией, заявка отправлена, ждём одобрения
+                        админа (канал НЕ банить, перепроверить в след. цикле);
+          - False     — реальная ошибка (нет прав / приватная / не найдена).
         """
         if linked_chat_id in self._joined_discussion_groups:
             return True  # Уже вступали в этой сессии
+        
+        # Ждём одобрения — не спамим повторными заявками, но проверяем, не приняли ли уже.
+        if linked_chat_id in self._pending_discussion_groups:
+            try:
+                linked_chat = await self.client.get_entity(linked_chat_id)
+                # get_participant кинет исключение, если мы ещё не участники
+                from telethon.tl.functions.channels import GetParticipantRequest
+                await self.client(GetParticipantRequest(linked_chat, 'me'))
+                # Дошли сюда — заявку одобрили
+                self._pending_discussion_groups.discard(linked_chat_id)
+                self._joined_discussion_groups.add(linked_chat_id)
+                self.log(f"✅ Заявка в обсуждения {channel_name} одобрена, теперь я участник")
+                return True
+            except Exception:
+                self.log(f"⏳ Заявка в обсуждения {channel_name} ещё не одобрена, жду", "info")
+                return "pending"
         
         try:
             linked_chat = await self.client.get_entity(linked_chat_id)
@@ -162,12 +187,26 @@ class BotWorker:
             self._joined_discussion_groups.add(linked_chat_id)
             self.log(f"✅ Вступил в группу обсуждений для {channel_name}")
             return True
+        except InviteRequestSentError:
+            # Группа с модерацией — заявка отправлена, ждём одобрения
+            self._pending_discussion_groups.add(linked_chat_id)
+            self.log(f"⏳ Заявка на вступление в обсуждения {channel_name} отправлена, жду одобрения админа", "warning")
+            return "pending"
         except Exception as e:
             err_str = str(e).lower()
             # Если уже участник - это ок, добавляем в кэш
             if "already" in err_str or "participant" in err_str:
                 self._joined_discussion_groups.add(linked_chat_id)
+                self._pending_discussion_groups.discard(linked_chat_id)
                 return True
+            # Разные формулировки "заявка отправлена, ждите одобрения"
+            if (("request" in err_str and "sent" in err_str)
+                    or "successfully requested" in err_str
+                    or "join request" in err_str
+                    or "request to join" in err_str):
+                self._pending_discussion_groups.add(linked_chat_id)
+                self.log(f"⏳ Заявка на вступление в обсуждения {channel_name} отправлена, жду одобрения", "warning")
+                return "pending"
             return False
 
     def _get_cached_setting(self, key: str, default=None):
@@ -273,17 +312,23 @@ class BotWorker:
 
 
     def log(self, message: str, level: str = "info"):
-        """Логирует сообщение с привязкой к аккаунту (с fallback на консоль)"""
+        """Логирует сообщение с привязкой к аккаунту (с fallback на консоль).
+
+        Любой уровень гарантированно сохраняется в БД. Уровень 'info' с зелёной
+        галочкой в начале авто-повышается до 'success' для наглядной подсветки.
+        """
         try:
-            if level == "info":
-                self.logger.info(message, account_id=self.account_id)
-            elif level == "error":
+            lvl = (level or "info").lower()
+            # Авто-детект успешных действий по эмодзи-галочке в начале сообщения
+            if lvl == "info" and message.lstrip().startswith(("✅", "☑️", "🎉")):
+                lvl = "success"
+            if lvl == "error":
                 self.logger.error(message, account_id=self.account_id, exc_info=True)
-            elif level == "warning":
-                self.logger.warning(message, account_id=self.account_id)
+            else:
+                self.logger.log(lvl, message, account_id=self.account_id)
         except Exception as e:
             # Fallback на консоль если БД недоступна
-            print(f"[{level.upper()}][acc:{self.account_id}] {message} (log error: {e})")
+            print(f"[{str(level).upper()}][acc:{self.account_id}] {message} (log error: {e})")
 
     def _update_account_status(self, status: str):
         """Обновляет статус аккаунта в базе данных"""
@@ -541,7 +586,7 @@ class BotWorker:
 
     def _update_active_channels(self):
         """Обновляет список активных каналов из БД, исключая забаненные для этого аккаунта"""
-        # Получаем каналы из базы данных (только с открытыми комментами)
+        # Получаем каналы и�� базы данных (только с открытыми комментами)
         try:
             db_channels = self.db.get_found_channels(limit=500, only_open_comments=True)
             all_channels = [ch['channel'] for ch in db_channels]
@@ -708,6 +753,10 @@ class BotWorker:
                                 joined = await self._join_discussion_group_if_needed(
                                     full_channel.full_chat.linked_chat_id, name
                                 )
+                                if joined == "pending":
+                                    # Заявка на модерации — НЕ баним, вернёмся к каналу позже
+                                    self.db.unlock_channel(name)
+                                    continue
                                 if joined:
                                     # Повторяем попытку получить обсуждение
                                     await asyncio.sleep(2)
@@ -875,7 +924,8 @@ class BotWorker:
                 
                 # Проверка на пустой комментарий (нейросеть не сработала)
                 if not comment or not comment.strip():
-                    self.log(f"⚠️ Нейросеть не вернула комментарий для {name}, пропускаю")
+                    reason = getattr(self.comment_generator, "last_error", "") or "неизвестная причина"
+                    self.log(f"⚠️ Нейросеть не вернула комментарий для {name} ({reason}), пропускаю", "warning")
                     # Если был быстрый коммент - удаляем заглушку
                     if quick_mode and result:
                         try:
@@ -896,7 +946,7 @@ class BotWorker:
                             break
                     else:
                         self.log(f"⚠️ Не удалось сгенерировать уникальный комментарий для {name}, пропускаю")
-                        # Если был быстрый коммент - удаляем заглушку
+                        # Если был быстрый коммен�� - удаляем заглушку
                         if quick_mode and result:
                             try:
                                 await self.client.delete_messages(channel, [result.id])
@@ -1287,7 +1337,7 @@ class BotWorker:
 {context}
 
 Напиши короткий естественный ответ на последнее сообщение. 
-Отвечай по теме обсуждения, как обычный участник чата.
+Отвечай по теме обсужде��ия, как обычный участник чата.
 Максимум 1-2 предложения."""
                     
                     # Используем специальный метод для чатов (без сохранения истории)
@@ -1556,7 +1606,7 @@ class BotWorker:
             if not all_channels:
                 return
             
-            # Получаем список каналов, в которых аккаунт уже состоит
+            # Получаем список каналов, в которых аккаунт уже сос��оит
             my_dialogs = set()
             try:
                 async for dialog in self.client.iter_dialogs(limit=300):
@@ -1845,7 +1895,7 @@ class BotWorker:
             'я человек', "i'm human", 'start', 'начать'
         ]
         
-        # Известные антиспам-боты (проверяем по имени отправителя)
+        # Извест��ые антиспам-боты (проверяем по имени отправителя)
         antispam_bot_names = [
             'rose', 'combot', 'shieldy', 'captcha', 'guard', 'gatekeeper',
             'verificator', 'антиспам', 'antispam', 'welcome', 'greeter',
@@ -1961,7 +2011,7 @@ class BotWorker:
             
             async for dialog in self.client.iter_dialogs():
                 if not self.is_running: break
-                # Проверяем подключение в цикле
+                # Проверяем п��дключение в цикле
                 if not self.client.is_connected():
                     break
                 if isinstance(dialog.entity, Channel):

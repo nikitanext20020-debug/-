@@ -116,10 +116,15 @@ document.querySelectorAll('.tab').forEach(btn => {
     btn.classList.add('active');
     const id = 'tab-' + btn.dataset.tab;
     document.getElementById(id).classList.add('active');
-    if (btn.dataset.tab === 'channels') Channels.refresh();
+    if (btn.dataset.tab === 'channels') { Channels.refresh(); Pending.refresh(); }
     if (btn.dataset.tab === 'logs') Logs.refresh();
     if (btn.dataset.tab === 'accounts') Accounts.refresh();
     if (btn.dataset.tab === 'proxies') Proxies.refresh();
+    if (btn.dataset.tab === 'stats') Stats.refresh();
+    if (btn.dataset.tab === 'comments') { accSelectFill('cm-acc-select', { includeAll: true }); Comments.refresh(); }
+    if (btn.dataset.tab === 'inviter') Inviter.refresh();
+    if (btn.dataset.tab === 'masssend') MassSend.refresh();
+    if (btn.dataset.tab === 'ownchannels') OwnChannels.refresh();
   });
 });
 
@@ -215,7 +220,7 @@ const Accounts = {
         toast('Воркер запущен', 'ok');
       } else if (act === 'stop') {
         await API.post(`/accounts/${id}/stop`);
-        toast('Воркер остановлен', 'ok');
+        toast('Воркер ост��новлен', 'ok');
       } else if (act === 'delete') {
         if (!confirm('Удалить аккаунт?')) return;
         await API.del(`/accounts/${id}`);
@@ -715,31 +720,110 @@ document.getElementById('btn-check-proxy').addEventListener('click', async () =>
 // ============ LOGS ============
 const Logs = {
   _timer: null,
+  _last: [],
+  _accountsFilled: false,
+
+  accLabel(l) {
+    if (l.account_id == null) return 'sys';
+    if (l.phone) return l.phone;
+    return 'acc:' + l.account_id;
+  },
+
+  fillAccounts() {
+    const sel = document.getElementById('logs-account');
+    if (!sel) return;
+    const prev = sel.value;
+    const accs = Accounts.data || [];
+    sel.innerHTML = '<option value="">Все аккаунты</option>' +
+      accs.map(a => `<option value="${a.id}">${escape(a.phone || ('acc ' + a.id))}</option>`).join('');
+    if (prev) sel.value = prev;
+    this._accountsFilled = true;
+  },
+
+  async refreshSummary() {
+    try {
+      const counts = await API.get('/logs/summary?hours=24');
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v || 0; };
+      set('lb-success', counts.success);
+      set('lb-info', counts.info);
+      set('lb-warning', counts.warning);
+      set('lb-error', counts.error);
+    } catch { /* ignore */ }
+  },
+
   async refresh() {
     const c = document.getElementById('logs-container');
+    if (!this._accountsFilled) this.fillAccounts();
     const lvl = document.getElementById('logs-level').value;
+    const search = (document.getElementById('logs-search').value || '').trim();
+    const acc = document.getElementById('logs-account').value;
+
+    // Сохраняем позицию скролла, чтобы автообновление не дёргало чтение
+    const atTop = c.scrollTop <= 8;
+    const prevScroll = c.scrollTop;
+
     try {
       const params = new URLSearchParams();
       if (lvl) params.set('level', lvl);
-      params.set('limit', '300');
+      if (search) params.set('search', search);
+      if (acc) params.set('account_id', acc);
+      params.set('limit', '400');
       const data = await API.get('/logs?' + params.toString());
       const list = Array.isArray(data) ? data : (data.logs || []);
-      if (!list.length) { c.textContent = '— пусто —'; return; }
-      c.innerHTML = list.map(l => {
+      this._last = list;
+      this.refreshSummary();
+
+      if (!list.length) { c.innerHTML = '<div class="logs-empty">— нет записей по фильтру —</div>'; return; }
+
+      c.innerHTML = list.map((l, i) => {
         const ts = (l.timestamp || '').slice(11, 19) || '--:--:--';
-        const level = (l.level || 'info').toLowerCase();
-        const acc = l.account_id != null ? `acc:${l.account_id}` : 'sys';
-        return `<div class="log-line">
-          <span class="log-time">${escape(ts)}</span>
-          <span class="log-level ${escape(level)}">${escape(level)}</span>
+        const date = (l.timestamp || '').slice(0, 10);
+        let level = (l.level || 'info').toLowerCase();
+        if (!['success', 'info', 'warning', 'error', 'debug', 'critical'].includes(level)) level = 'info';
+        const acc = this.accLabel(l);
+        const mod = l.module ? `<span class="log-mod">${escape(l.module)}</span>` : '';
+        const trace = l.stack_trace
+          ? `<details class="log-trace"><summary>stack trace</summary><pre>${escape(l.stack_trace)}</pre></details>`
+          : '';
+        return `<div class="log-line ${level}">
+          <span class="log-time" title="${escape(date + ' ' + ts)}">${escape(ts)}</span>
+          <span class="log-level ${level}">${escape(level)}</span>
           <span class="log-acc">${escape(acc)}</span>
-          <span class="log-msg">${escape(l.message || '')}</span>
+          <span class="log-msg">${escape(l.message || '')}${mod}${trace}</span>
         </div>`;
       }).join('');
+
+      // Восстанавливаем скролл: если были вверху (смотрим новые) — остаёмся вверху
+      c.scrollTop = atTop ? 0 : prevScroll;
     } catch (e) {
-      c.textContent = `Ошибка: ${e.message}`;
+      c.innerHTML = `<div class="logs-empty">Ошибка: ${escape(e.message)}</div>`;
     }
   },
+
+  toText() {
+    return (this._last || []).map(l =>
+      `[${(l.timestamp || '').slice(0, 19)}] [${(l.level || 'info').toUpperCase()}] [${this.accLabel(l)}] ${l.message || ''}` +
+      (l.stack_trace ? `\n${l.stack_trace}` : '')
+    ).join('\n');
+  },
+
+  async copy() {
+    try {
+      await navigator.clipboard.writeText(this.toText());
+      toast('Логи скопированы', 'ok');
+    } catch { toast('Не удалось скопировать', 'error'); }
+  },
+
+  download() {
+    const blob = new Blob([this.toText()], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `neurocore-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
   startAuto() {
     this.stopAuto();
     this._timer = setInterval(() => this.refresh(), 4000);
@@ -751,8 +835,25 @@ const Logs = {
 };
 document.getElementById('btn-refresh-logs').addEventListener('click', () => Logs.refresh());
 document.getElementById('logs-level').addEventListener('change', () => Logs.refresh());
+document.getElementById('logs-account').addEventListener('change', () => Logs.refresh());
+document.getElementById('btn-copy-logs').addEventListener('click', () => Logs.copy());
+document.getElementById('btn-download-logs').addEventListener('click', () => Logs.download());
 document.getElementById('logs-autorefresh').addEventListener('change', (e) => {
   if (e.target.checked) Logs.startAuto(); else Logs.stopAuto();
+});
+// Дебаунс поиска
+let _logsSearchTimer = null;
+document.getElementById('logs-search').addEventListener('input', () => {
+  clearTimeout(_logsSearchTimer);
+  _logsSearchTimer = setTimeout(() => Logs.refresh(), 350);
+});
+// Клик по бейджу уровня — быстрый фильтр
+document.querySelectorAll('#logs-badges .log-badge').forEach(b => {
+  b.addEventListener('click', () => {
+    const sel = document.getElementById('logs-level');
+    sel.value = (sel.value === b.dataset.level) ? '' : b.dataset.level;
+    Logs.refresh();
+  });
 });
 
 // ============ HEADER STATUS ============
@@ -790,6 +891,600 @@ function escape(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+
+// ============ SETTINGS ============
+const Settings = {
+  fields() { return Array.from(document.querySelectorAll('[data-setting]')); },
+
+  async load() {
+    let data;
+    try {
+      data = await API.get('/settings');
+    } catch (e) {
+      console.log('[v0] Settings load error:', e.message);
+      return;
+    }
+    for (const el of this.fields()) {
+      const key = el.dataset.setting;
+      if (!(key in data)) continue;
+      const val = data[key];
+      if (el.type === 'checkbox') {
+        el.checked = !!val;
+      } else if (val === null || val === undefined) {
+        el.value = '';
+      } else {
+        el.value = val;
+      }
+    }
+    // Глобальная пауза
+    const pause = document.getElementById('global-pause-toggle');
+    if (pause && 'global_pause' in data) pause.checked = !!data.global_pause;
+  },
+
+  collect() {
+    const payload = {};
+    for (const el of this.fields()) {
+      const key = el.dataset.setting;
+      if (el.type === 'checkbox') {
+        payload[key] = el.checked;
+      } else if (el.type === 'number') {
+        const raw = el.value.trim();
+        if (raw === '') continue;            // пустое число не отправляем
+        const num = Number(raw);
+        if (!Number.isNaN(num)) payload[key] = num;
+      } else {
+        payload[key] = el.value;
+      }
+    }
+    return payload;
+  },
+
+  async save() {
+    const btn = document.getElementById('btn-save-settings');
+    const payload = this.collect();
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = 'Сохранение…';
+    try {
+      await API.post('/settings', payload);
+      toast('Настройки сохранены', 'ok');
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  },
+
+  async testAI() {
+    const out = document.getElementById('settings-test-result');
+    const btn = document.getElementById('btn-test-ai');
+    btn.disabled = true;
+    if (out) out.innerHTML = '<span class="muted">Проверяю нейросеть…</span>';
+    try {
+      // Сначала сохраняем ключ/модель, чтобы тест шёл по текущим значениям
+      await API.post('/settings', this.collect());
+      const r = await API.post('/settings/test-ai');
+      const ok = r.status === 'ok' || r.status === 'success';
+      if (out) out.innerHTML = `<span class="pill ${ok ? 'good' : 'bad'}">${escape(r.message || (ok ? 'OK' : 'Ошибка'))}</span>`;
+      toast(r.message || (ok ? 'Нейросеть отвечает' : 'Ошибка нейросети'), ok ? 'ok' : 'error');
+    } catch (e) {
+      if (out) out.innerHTML = `<span class="pill bad">Ошибка: ${escape(e.message)}</span>`;
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  },
+};
+
+document.getElementById('btn-save-settings')?.addEventListener('click', () => Settings.save());
+document.getElementById('btn-test-ai')?.addEventListener('click', () => Settings.testAI());
+document.getElementById('global-pause-toggle')?.addEventListener('change', async (e) => {
+  try {
+    await API.post('/settings', { global_pause: e.target.checked });
+    toast(e.target.checked ? 'Глобальная пауза включена' : 'Глобальная пауза выключена', 'ok');
+  } catch (err) {
+    toast(err.message, 'error');
+    e.target.checked = !e.target.checked;
+  }
+});
+
+// ============ SHARED HELPERS ============
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Заполняет <select> списком аккаунтов из Accounts.data
+function accSelectFill(selId, { includeAll = false } = {}) {
+  const sel = document.getElementById(selId);
+  if (!sel) return;
+  const prev = sel.value;
+  const accs = Accounts.data || [];
+  let html = includeAll ? '<option value="">Все аккаунты</option>' : '';
+  html += accs.map(a =>
+    `<option value="${a.id}">${escape(a.phone || ('acc ' + a.id))}${a.is_running ? '' : ' (не запущен)'}</option>`
+  ).join('');
+  sel.innerHTML = html || '<option value="">Нет аккаунтов</option>';
+  if (prev && accs.some(a => String(a.id) === prev)) sel.value = prev;
+}
+
+function accPhone(id) {
+  const a = (Accounts.data || []).find(x => String(x.id) === String(id));
+  return a ? (a.phone || ('acc ' + id)) : ('acc ' + id);
+}
+
+// ============ STATS ============
+const Stats = {
+  async refresh() {
+    try {
+      const g = await API.get('/stats/global');
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v ?? 0).toLocaleString('ru-RU'); };
+      set('st-total-channels', g.total_channels);
+      set('st-open-channels', g.open_comments_channels);
+      set('st-accounts', g.total_accounts);
+      set('st-total-comments', g.total_comments);
+      set('st-total-likes', g.total_likes);
+      set('st-new-today', g.new_channels_today);
+    } catch (e) { toast(e.message, 'error'); }
+
+    try {
+      const h = await API.get('/stats/24h');
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v ?? 0).toLocaleString('ru-RU'); };
+      set('st-comments-24h', h.comments_24h);
+      set('st-success-today', h.success_today);
+      set('st-errors-today', h.errors_today);
+      set('st-likes-24h', h.likes_24h);
+      set('st-channels-24h', h.channels_commented_24h);
+      set('st-new-24h', h.new_channels_24h);
+
+      const tbody = document.getElementById('st-accounts-tbody');
+      const act = h.accounts_activity || [];
+      if (!act.length) {
+        tbody.innerHTML = `<tr><td colspan="2" class="empty">Нет активности</td></tr>`;
+      } else {
+        tbody.innerHTML = act.map(a =>
+          `<tr><td>${escape(accPhone(a.account_id))}</td><td>${(a.comments || 0).toLocaleString('ru-RU')}</td></tr>`
+        ).join('');
+      }
+    } catch (e) { /* ignore */ }
+  },
+};
+document.getElementById('btn-refresh-stats')?.addEventListener('click', () => Stats.refresh());
+document.getElementById('btn-clear-stats')?.addEventListener('click', async () => {
+  if (!confirm('Полностью очистить статистику, комментарии, логи и баны? Действие необратимо.')) return;
+  try {
+    const r = await API.post('/admin/clear-stats');
+    toast((r && r.message) || 'Очищено', 'ok');
+    Stats.refresh();
+  } catch (e) { toast(e.message, 'error'); }
+});
+
+// ============ COMMENTS ============
+const Comments = {
+  data: [],
+  async refresh() {
+    const tbody = document.getElementById('comments-tbody');
+    const accId = document.getElementById('cm-acc-select').value;
+    try {
+      this.data = await API.get('/comments' + (accId ? `?account_id=${accId}` : ''));
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Ошибка: ${escape(e.message)}</td></tr>`;
+      return;
+    }
+    this.render();
+  },
+  render() {
+    const q = (document.getElementById('comments-search').value || '').toLowerCase().trim();
+    const tbody = document.getElementById('comments-tbody');
+    let rows = this.data;
+    if (q) rows = rows.filter(c =>
+      (c.comment_text || '').toLowerCase().includes(q) ||
+      (c.channel || '').toLowerCase().includes(q));
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Нет комментариев</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map(c => {
+      const ch = escape(c.channel || '—');
+      const chCell = c.link ? `<a href="${escape(c.link)}" target="_blank" rel="noopener">${ch}</a>` : ch;
+      const typeLabel = c.message_type === 'chat' ? '<span class="pill">чат</span>' : '<span class="pill good">коммент</span>';
+      return `
+        <tr>
+          <td>${chCell}<div class="muted small">${escape(c.account_phone || '')}</div></td>
+          <td>${escape((c.comment_text || '').slice(0, 120))}</td>
+          <td>${typeLabel}</td>
+          <td class="muted small">${escape((c.sent_at || '').slice(0, 16))}</td>
+          <td>
+            <button class="btn btn-ghost btn-sm" data-edit="${c.id}" title="Редактировать">✎</button>
+            <button class="btn btn-ghost btn-sm" data-del="${c.id}" title="Удалить">×</button>
+          </td>
+        </tr>`;
+    }).join('');
+    tbody.querySelectorAll('[data-edit]').forEach(b => {
+      b.addEventListener('click', () => this.edit(+b.dataset.edit));
+    });
+    tbody.querySelectorAll('[data-del]').forEach(b => {
+      b.addEventListener('click', () => this.remove(+b.dataset.del));
+    });
+  },
+  async edit(id) {
+    const c = this.data.find(x => x.id === id);
+    const current = c ? c.comment_text : '';
+    const next = prompt('Новый текст комментария:', current || '');
+    if (next === null || next.trim() === '' || next === current) return;
+    try {
+      const r = await API.put(`/comments/${id}`, { new_text: next.trim() });
+      toast((r && r.message) || 'Отредактировано', 'ok');
+      this.refresh();
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  async remove(id) {
+    if (!confirm('Удалить комментарий (в том числе из Telegram, если аккаунт запущен)?')) return;
+    try {
+      await API.del(`/comments/${id}`);
+      toast('Удалён', 'ok');
+      this.refresh();
+    } catch (e) { toast(e.message, 'error'); }
+  },
+};
+document.getElementById('btn-refresh-comments')?.addEventListener('click', () => Comments.refresh());
+document.getElementById('cm-acc-select')?.addEventListener('change', () => Comments.refresh());
+document.getElementById('comments-search')?.addEventListener('input', () => Comments.render());
+
+// ============ PENDING (заявки на модерации) ============
+const Pending = {
+  async refresh() {
+    const tbody = document.getElementById('pending-tbody');
+    if (!tbody) return;
+    let rows;
+    try {
+      rows = await API.get('/discovery/pending');
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Ошибка: ${escape(e.message)}</td></tr>`;
+      return;
+    }
+    const countEl = document.getElementById('pending-count');
+    if (countEl) countEl.textContent = rows.length;
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Нет заявок</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map(p => `
+      <tr>
+        <td>${escape(p.channel_title || ('+' + (p.invite_hash || '')))}</td>
+        <td class="muted small">${escape(accPhone(p.account_id))}</td>
+        <td><span class="pill">${escape(p.status || 'pending')}</span></td>
+        <td class="muted small">${escape((p.requested_at || '').slice(0, 16))}</td>
+        <td class="muted small">${p.check_count || 0}</td>
+      </tr>`).join('');
+  },
+};
+
+// ============ CHANNEL FILTER ============
+const ChannelFilter = {
+  _poll: null,
+  criteria() {
+    return {
+      min_subscribers: +document.getElementById('flt-min-subs').value || 0,
+      min_avg_views: +document.getElementById('flt-min-views').value || 0,
+      max_days_since_last_post: +document.getElementById('flt-max-days').value || 7,
+      min_posts_per_week: +document.getElementById('flt-min-posts').value || 0,
+      require_open_comments: document.getElementById('flt-open-comments').checked,
+      junk_filter: document.getElementById('flt-junk').checked,
+    };
+  },
+  async start() {
+    const raw = (document.getElementById('flt-channels').value || '').trim();
+    const channels = raw ? raw.split('\n').map(s => s.trim()).filter(Boolean) : null;
+    try {
+      const r = await API.post('/api/channels/filter/start', { channels, criteria: this.criteria() });
+      toast(`Фильтрация запущена (${r.total || 0} каналов)`, 'ok');
+      document.getElementById('filter-results-wrap').style.display = 'none';
+      this.startPolling();
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  startPolling() {
+    this.stopPolling();
+    this._poll = setInterval(() => this.pollProgress(), 1500);
+  },
+  stopPolling() { if (this._poll) { clearInterval(this._poll); this._poll = null; } },
+  async pollProgress() {
+    try {
+      const p = await API.get('/api/channels/filter/progress');
+      const el = document.getElementById('filter-progress');
+      el.textContent = `Обработано ${p.processed || 0}/${p.total || 0} · прошло ${p.passed || 0} · отсеяно ${p.rejected || 0} · ошибок ${p.errors || 0}`;
+      if (!p.running && (p.processed || 0) >= (p.total || 0) && (p.total || 0) > 0) {
+        this.stopPolling();
+        this.loadResults();
+      }
+    } catch (e) { this.stopPolling(); }
+  },
+  async loadResults() {
+    try {
+      const r = await API.get('/api/channels/filter/results');
+      const wrap = document.getElementById('filter-results-wrap');
+      const tbody = document.getElementById('filter-results-tbody');
+      if (!r.results || !r.results.length) { wrap.style.display = 'none'; return; }
+      wrap.style.display = '';
+      tbody.innerHTML = r.results.slice(0, 500).map(x => {
+        const cls = x.status === 'passed' ? 'good' : (x.status === 'rejected' ? 'bad' : '');
+        return `<tr>
+          <td>${escape(x.channel || '')}</td>
+          <td><span class="pill ${cls}">${escape(x.status || '')}</span></td>
+          <td class="muted small">${escape(x.reason || '')}</td>
+        </tr>`;
+      }).join('');
+    } catch (e) { /* ignore */ }
+  },
+  async stop() {
+    try { await API.post('/api/channels/filter/stop'); this.stopPolling(); toast('Остановлено', 'ok'); }
+    catch (e) { toast(e.message, 'error'); }
+  },
+  async apply() {
+    if (!confirm('Удалить все отсеянные (rejected) каналы из базы?')) return;
+    try {
+      const r = await API.post('/api/channels/filter/apply');
+      toast(`Удалено каналов: ${r.removed ?? r.deleted ?? 0}`, 'ok');
+      Channels.refresh();
+    } catch (e) { toast(e.message, 'error'); }
+  },
+};
+document.getElementById('btn-filter-start')?.addEventListener('click', (e) => { e.preventDefault(); ChannelFilter.start(); });
+document.getElementById('btn-filter-stop')?.addEventListener('click', (e) => { e.preventDefault(); ChannelFilter.stop(); });
+document.getElementById('btn-filter-apply')?.addEventListener('click', (e) => { e.preventDefault(); ChannelFilter.apply(); });
+
+// ============ INVITER ============
+const Inviter = {
+  accId() { return document.getElementById('inv-acc-select').value; },
+  async refresh() {
+    accSelectFill('inv-acc-select');
+    const id = this.accId();
+    if (!id) return;
+    try {
+      const s = await API.get(`/accounts/${id}/inviter/stats`);
+      document.getElementById('inv-parsed').textContent = (s.total ?? 0);
+      document.getElementById('inv-invited').textContent = (s.success ?? 0);
+      document.getElementById('inv-errors').textContent = (s.errors ?? 0);
+      document.getElementById('inv-today').textContent = (s.today_count ?? 0);
+    } catch (e) { /* ignore */ }
+    this.loadChats();
+  },
+  async loadChats() {
+    const id = this.accId();
+    const sel = document.getElementById('inv-chats-select');
+    if (!id) { sel.innerHTML = '<option value="">Выберите аккаунт</option>'; return; }
+    sel.innerHTML = '<option value="">— загрузка —</option>';
+    try {
+      const chats = await API.get(`/accounts/${id}/inviter/chats`);
+      sel.innerHTML = '<option value="">— выберите чат —</option>' +
+        (chats || []).map(c => `<option value="${escape(String(c.id ?? c.username ?? ''))}">${escape(c.title || c.username || c.id)}</option>`).join('');
+    } catch (e) { sel.innerHTML = '<option value="">Не удалось загрузить (аккаунт запущен?)</option>'; }
+  },
+};
+document.getElementById('btn-refresh-inviter')?.addEventListener('click', () => Inviter.refresh());
+document.getElementById('inv-acc-select')?.addEventListener('change', () => Inviter.refresh());
+document.getElementById('inv-chats-select')?.addEventListener('change', (e) => {
+  const f = document.getElementById('form-parse-users');
+  if (e.target.value) f.chat_id.value = e.target.value;
+});
+document.getElementById('form-parse-users')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = Inviter.accId();
+  if (!id) { toast('Выберите аккаунт', 'error'); return; }
+  const chat = e.target.chat_id.value.trim();
+  const status = document.getElementById('parse-status');
+  status.textContent = 'Парсинг…';
+  try {
+    const r = await API.post(`/accounts/${id}/inviter/parse`, { chat_id: chat });
+    status.textContent = `Спарсено: ${r.parsed_count ?? 0}`;
+    toast(`Спарсено пользователей: ${r.parsed_count ?? 0}`, 'ok');
+    Inviter.refresh();
+  } catch (err) { status.textContent = ''; toast(err.message, 'error'); }
+});
+document.getElementById('form-invite-start')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = Inviter.accId();
+  if (!id) { toast('Выберите аккаунт', 'error'); return; }
+  const body = {
+    channel_id: +e.target.channel_id.value,
+    source_chat_id: e.target.source_chat_id.value.trim() || null,
+    daily_limit: e.target.daily_limit.value ? +e.target.daily_limit.value : null,
+  };
+  try {
+    const r = await API.post(`/accounts/${id}/inviter/start`, body);
+    toast((r && r.message) || 'Инвайт запущен', 'ok');
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+// ============ MASS SEND ============
+const MassSend = {
+  accId() { return document.getElementById('ms-acc-select').value; },
+  async refresh() {
+    accSelectFill('ms-acc-select');
+    const tbody = document.getElementById('ms-campaigns-tbody');
+    const id = this.accId();
+    if (!id) { tbody.innerHTML = `<tr><td colspan="6" class="empty">Выберите аккаунт</td></tr>`; return; }
+    try {
+      const camps = await API.get(`/accounts/${id}/mass-send/campaigns`);
+      if (!camps || !camps.length) { tbody.innerHTML = `<tr><td colspan="6" class="empty">Нет кампаний</td></tr>`; return; }
+      const rows = await Promise.all(camps.map(async c => {
+        let st = {};
+        try { st = await API.get(`/accounts/${id}/mass-send/campaigns/${c.id}/stats`); } catch {}
+        return `<tr>
+          <td>${c.id}</td>
+          <td>${escape(c.name || '—')}</td>
+          <td>${escape(c.target_type || '—')}</td>
+          <td><span class="pill">${escape(c.status || '—')}</span></td>
+          <td>${st.sent ?? 0}</td>
+          <td>${st.errors ?? 0}</td>
+        </tr>`;
+      }));
+      tbody.innerHTML = rows.join('');
+    } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty">Ошибка: ${escape(e.message)}</td></tr>`; }
+  },
+  parseIds(raw) {
+    return (raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  },
+};
+document.getElementById('btn-refresh-masssend')?.addEventListener('click', () => MassSend.refresh());
+document.getElementById('ms-acc-select')?.addEventListener('change', () => MassSend.refresh());
+document.getElementById('form-ms-dm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = MassSend.accId();
+  if (!id) { toast('Выберите аккаунт', 'error'); return; }
+  const user_ids = MassSend.parseIds(e.target.user_ids.value).map(Number).filter(n => !Number.isNaN(n));
+  if (!user_ids.length) { toast('Укажите ID пользователей', 'error'); return; }
+  const body = {
+    user_ids,
+    message_template: e.target.message_template.value,
+    hourly_limit: e.target.hourly_limit.value ? +e.target.hourly_limit.value : null,
+  };
+  const f = e.target.media.files[0];
+  if (f) body.media_base64 = await fileToBase64(f);
+  try {
+    const r = await API.post(`/accounts/${id}/mass-send/dm`, body);
+    toast(`ЛС-рассылка запущена (кампания #${r.campaign_id})`, 'ok');
+    MassSend.refresh();
+  } catch (err) { toast(err.message, 'error'); }
+});
+document.getElementById('form-ms-groups')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = MassSend.accId();
+  if (!id) { toast('Выберите аккаунт', 'error'); return; }
+  const chat_ids = MassSend.parseIds(e.target.chat_ids.value);
+  if (!chat_ids.length) { toast('Укажите группы', 'error'); return; }
+  const body = {
+    chat_ids,
+    message_template: e.target.message_template.value,
+    hourly_limit: e.target.hourly_limit.value ? +e.target.hourly_limit.value : null,
+  };
+  const f = e.target.media.files[0];
+  if (f) body.media_base64 = await fileToBase64(f);
+  try {
+    const r = await API.post(`/accounts/${id}/mass-send/groups`, body);
+    toast(`Рассылка в группы запущена (кампания #${r.campaign_id})`, 'ok');
+    MassSend.refresh();
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+// ============ OWN CHANNELS ============
+const OwnChannels = {
+  data: [],
+  selectedChannel: null,
+  accId() { return document.getElementById('own-acc-select').value; },
+  async refresh() {
+    accSelectFill('own-acc-select');
+    const tbody = document.getElementById('own-channels-tbody');
+    const id = this.accId();
+    if (!id) { tbody.innerHTML = `<tr><td colspan="3" class="empty">Выберите аккаунт</td></tr>`; return; }
+    try {
+      this.data = await API.get(`/accounts/${id}/channels`);
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="3" class="empty">Ошибка: ${escape(e.message)}</td></tr>`;
+      return;
+    }
+    if (!this.data.length) { tbody.innerHTML = `<tr><td colspan="3" class="empty">Нет каналов</td></tr>`; return; }
+    tbody.innerHTML = this.data.map(c => `
+      <tr>
+        <td>${escape(c.title || c.username || '—')}<div class="muted small">@${escape(c.username || '')}</div></td>
+        <td class="muted small">${escape(String(c.channel_id || ''))}</td>
+        <td><button class="btn btn-ghost btn-sm" data-select="${c.channel_id}" data-label="${escape(c.title || c.username || '')}">Выбрать</button></td>
+      </tr>`).join('');
+    tbody.querySelectorAll('[data-select]').forEach(b => {
+      b.addEventListener('click', () => {
+        this.selectedChannel = +b.dataset.select;
+        document.getElementById('own-post-channel-label').textContent = b.dataset.label;
+        this.loadQueue();
+      });
+    });
+  },
+  async loadQueue() {
+    const id = this.accId();
+    const list = document.getElementById('own-queue-list');
+    if (!id || !this.selectedChannel) { list.innerHTML = '<span class="muted small">—</span>'; return; }
+    try {
+      const posts = await API.get(`/accounts/${id}/channel/${this.selectedChannel}/queue`);
+      if (!posts.length) { list.innerHTML = '<span class="muted small">Очередь пуста</span>'; return; }
+      list.innerHTML = posts.map(p =>
+        `<div class="mini-list-item">${escape((p.content_text || '').slice(0, 100))}<div class="muted small">${escape(p.scheduled_at || 'сразу')}</div></div>`
+      ).join('');
+    } catch (e) { list.innerHTML = `<span class="muted small">Ошибка: ${escape(e.message)}</span>`; }
+  },
+};
+document.getElementById('btn-refresh-own')?.addEventListener('click', () => OwnChannels.refresh());
+document.getElementById('own-acc-select')?.addEventListener('change', () => OwnChannels.refresh());
+document.getElementById('form-create-channel')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = OwnChannels.accId();
+  if (!id) { toast('Выберите аккаунт', 'error'); return; }
+  const status = document.getElementById('create-channel-status');
+  const body = {
+    title: e.target.title.value.trim(),
+    about: e.target.about.value.trim(),
+    username_base: e.target.username_base.value.trim(),
+    topic: e.target.topic.value.trim(),
+  };
+  const f = e.target.avatar.files[0];
+  if (f) body.avatar_base64 = await fileToBase64(f);
+  status.textContent = 'Создание… (может занять до минуты)';
+  try {
+    const r = await API.post(`/accounts/${id}/channel/create`, body);
+    status.textContent = 'Канал создан!';
+    toast('Канал создан: ' + (r.username ? '@' + r.username : r.title || ''), 'ok');
+    e.target.reset();
+    OwnChannels.refresh();
+  } catch (err) { status.textContent = ''; toast(err.message, 'error'); }
+});
+document.getElementById('form-post-channel')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = OwnChannels.accId();
+  if (!id || !OwnChannels.selectedChannel) { toast('Выберите канал в таблице', 'error'); return; }
+  const body = { text: e.target.text.value, format_type: 'md' };
+  const f = e.target.media.files[0];
+  if (f) {
+    body.media_base64 = await fileToBase64(f);
+    body.media_type = f.type.startsWith('video') ? 'video' : 'photo';
+  }
+  try {
+    await API.post(`/accounts/${id}/channel/${OwnChannels.selectedChannel}/post`, body);
+    toast('Опубликовано', 'ok');
+    e.target.reset();
+  } catch (err) { toast(err.message, 'error'); }
+});
+document.getElementById('btn-queue-post')?.addEventListener('click', async () => {
+  const id = OwnChannels.accId();
+  if (!id || !OwnChannels.selectedChannel) { toast('Выберите канал в таблице', 'error'); return; }
+  const form = document.getElementById('form-post-channel');
+  const body = { text: form.text.value, format_type: 'md' };
+  const f = form.media.files[0];
+  if (f) {
+    body.media_base64 = await fileToBase64(f);
+    body.media_type = f.type.startsWith('video') ? 'video' : 'photo';
+  }
+  try {
+    await API.post(`/accounts/${id}/channel/${OwnChannels.selectedChannel}/queue`, body);
+    toast('Добавлено в очередь', 'ok');
+    form.reset();
+    OwnChannels.loadQueue();
+  } catch (err) { toast(err.message, 'error'); }
+});
+document.getElementById('form-generate-post')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = OwnChannels.accId();
+  if (!id || !OwnChannels.selectedChannel) { toast('Выберите канал в таблице', 'error'); return; }
+  const topic = e.target.topic.value.trim();
+  if (!topic) { toast('Укажите тему', 'error'); return; }
+  try {
+    const r = await API.post(`/accounts/${id}/channel/${OwnChannels.selectedChannel}/generate-post`, { topic });
+    toast('Сгенерировано и опубликовано', 'ok');
+    e.target.reset();
+  } catch (err) { toast(err.message, 'error'); }
+});
 
 // ============ BOOT ============
 async function boot() {
