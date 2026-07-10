@@ -1013,13 +1013,13 @@ class Database:
 
     def cleanup_old_logs(self, days: int = 7) -> int:
         """
-        Удаляет логи старше указ��нного количества дней.
+        Удаляет логи старше указанного количества дней.
         
         Args:
             days: Количество дней (по умолчанию 7)
             
         Returns:
-            Количество удал��нных записей
+            Количество удалённых записей
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()

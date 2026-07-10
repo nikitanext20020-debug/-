@@ -220,7 +220,7 @@ const Accounts = {
         toast('Воркер запущен', 'ok');
       } else if (act === 'stop') {
         await API.post(`/accounts/${id}/stop`);
-        toast('Воркер ост��новлен', 'ok');
+        toast('Воркер остановлен', 'ok');
       } else if (act === 'delete') {
         if (!confirm('Удалить аккаунт?')) return;
         await API.del(`/accounts/${id}`);
@@ -343,7 +343,7 @@ document.getElementById('btn-add-account').addEventListener('click', () => modal
 modal.querySelector('.modal-close').addEventListener('click', () => modal.classList.add('hidden'));
 modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
 
-// Если API ID/Hash заданы глоба��ьно в 1.envv — прячем ручные поля, показываем подсказку
+// Если API ID/Hash заданы глобально в .env — прячем ручные поля, показываем подсказку
 (async () => {
   try {
     const cfg = await API.get('/config-status');

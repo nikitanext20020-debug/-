@@ -550,7 +550,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить проф��ль")
+            raise HTTPException(status_code=500, detail="Не удалось получить профиль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -713,11 +713,11 @@ class ProxyAssign(BaseModel):
 
 @app.post("/accounts/{acc_id}/proxy")
 async def assign_proxy(acc_id: int, data: ProxyAssign):
-    """Привязывает и��и отвязывает прокси от аккаунта"""
+    """Привязывает или отвязывает прокси от аккаунта"""
     accounts = db.get_accounts()
     account = next((a for a in accounts if a['id'] == acc_id), None)
     if not account:
-        raise HTTPException(status_code=404, detail="Аккаунт н�� найден")
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
     
     # Проверяем существование прокси если указан
     if data.proxy_id is not None:
@@ -796,7 +796,7 @@ class SettingsUpdate(BaseModel):
     work_mode: Optional[str] = None
     auto_night_mode: Optional[bool] = None
     warmup_mode: Optional[bool] = None  # Режим прогрева для новых аккаунтов
-    quick_comment_mode: Optional[bool] = None  # Быстрый ��оммент + редактирование
+    quick_comment_mode: Optional[bool] = None  # Быстрый коммент + редактирование
     quick_comment_max_age_minutes: Optional[int] = None  # Макс возраст поста для быстрого режима (минуты)
     # Комментить от имени канала/группы (send_as)
     comment_as_channel: Optional[bool] = None
@@ -1346,7 +1346,7 @@ async def fix_private_channel_titles():
         # Небольшая задержка
         await asyncio.sleep(0.3)
     
-    print(f"[fix-titles] Готово! ��справлено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
+    print(f"[fix-titles] Готово! Исправлено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
     return {"status": "ok", "fixed": fixed, "skipped": skipped, "errors": errors, "total": len(private_channels)}
 
 @app.post("/discovery/channels/{channel}/comment-now")
@@ -1355,7 +1355,7 @@ async def comment_now(channel: str):
     При бане автоматически пробует другой аккаунт."""
     import random
     
-    # Находим запущенный аккаунт который не забанен в этом кан��ле
+    # Находим запущенный аккаунт который не забанен в этом канале
     normalized = channel.lstrip('@')
     
     running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running]
@@ -1389,7 +1389,7 @@ async def comment_now(channel: str):
     ]
     
     async def send_comment_with_worker(acc_id, worker):
-        """Пыт��ется отправить комментарий через конкретный воркер"""
+        """Пытается отправить комментарий через конкретный воркер"""
         from telethon.tl.functions.messages import GetDiscussionMessageRequest
         from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest
         from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -1397,7 +1397,7 @@ async def comment_now(channel: str):
         
         entity = None
         
-        # Получ��ем/вступаем в канал
+        # Получаем/вступаем в канал
         try:
             if normalized.startswith('+'):
                 # Приватный канал
@@ -1407,7 +1407,7 @@ async def comment_now(channel: str):
                 if saved_channel_id:
                     try:
                         entity = await worker.client.get_entity(saved_channel_id)
-                        print(f"[comment-now] acc:{acc_id} Нашли ка��ал по ID: {saved_channel_id}")
+                        print(f"[comment-now] acc:{acc_id} Нашли канал по ID: {saved_channel_id}")
                     except:
                         pass
                 
@@ -1673,7 +1673,7 @@ async def edit_comment(comment_id: int, data: CommentEdit):
     """Редактирует комментарий в Telegram и обновляет в БД"""
     comment = db.get_comment_by_id(comment_id)
     if not comment:
-        raise HTTPException(status_code=404, detail="Комме��тарий не найден")
+        raise HTTPException(status_code=404, detail="Комментарий не найден")
     
     # Проверяем наличие message_id
     if not comment.get('message_id'):
@@ -1760,7 +1760,7 @@ async def start_discovery(background_tasks: BackgroundTasks):
     explorer = ChannelExplorer(active_worker.client, db, active_worker.account_id)
     # Сохраняем ссылку на explorer в воркере для возможности остановки
     active_worker.channel_explorer = explorer
-    # Зап��скаем в цикле воркера, так как клиент привязан к нему
+    # Запускаем в цикле воркера, так как клиент привязан к нему
     coro = explorer.run_discovery_cycle()
     future = active_worker.run_task(coro)
     if not future:
@@ -1896,7 +1896,7 @@ async def export_stats(account_id: int, days: int = 7):
         account_id: ID аккаунта
         days: Количество дней для выборки (по умолчанию 7)
     """
-    # Проверяем существовани�� аккаунта
+    # Проверяем существование аккаунта
     accounts = db.get_accounts()
     account = next((a for a in accounts if a['id'] == account_id), None)
     if not account:
@@ -1979,7 +1979,7 @@ async def get_stats_24h():
 @app.post("/admin/clear-stats")
 async def clear_all_stats():
     """
-    Полно��тью очищает статистику: комментарии, лайки, логи.
+    Полностью очищает статистику: комментарии, лайки, логи.
     Использовать, если данные устарели или нужно начать с чистого листа.
     """
     try:
@@ -2006,7 +2006,7 @@ async def clear_all_stats():
             cursor.execute("DELETE FROM processed_posts")
             posts_deleted = cursor.rowcount
             
-            # 6. Сбр��сываем список банов для всех аккаунтов
+            # 6. Сбрасываем список банов для всех аккаунтов
             cursor.execute("DELETE FROM channel_bans")
             bans_deleted = cursor.rowcount
             
@@ -2081,7 +2081,7 @@ async def bulk_update_profiles(data: BulkProfileUpdate):
     """
     from modules.profile_manager import ProfileManager
     
-    # Определя��м какие аккаунты обновлять
+    # Определяем какие аккаунты обновлять
     if data.account_ids:
         target_ids = data.account_ids
     else:
@@ -2520,7 +2520,7 @@ async def get_campaigns(acc_id: int):
 
 @app.get("/accounts/{acc_id}/mass-send/campaigns/{campaign_id}/stats")
 async def get_campaign_stats_api(acc_id: int, campaign_id: int):
-    """Получает статистику камп��нии"""
+    """Получает статистику кампании"""
     return db.get_campaign_stats(campaign_id)
 
 
