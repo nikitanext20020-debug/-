@@ -364,7 +364,7 @@ class BotWorker:
                 proxy_type_name = "SOCKS5" if proxy[0] == socks.SOCKS5 else "HTTP"
                 proxy_ip = proxy[1]
                 proxy_port = proxy[2]
-                self.log(f"🌐 Подключ��ние через прокси: {proxy_type_name} {proxy_ip}:{proxy_port}")
+                self.log(f"🌐 Подключение через прокси: {proxy_type_name} {proxy_ip}:{proxy_port}")
             else:
                 self.log("🌐 Подключение без прокси (прямое соединение)")
             
@@ -586,7 +586,7 @@ class BotWorker:
 
     def _update_active_channels(self):
         """Обновляет список активных каналов из БД, исключая забаненные для этого аккаунта"""
-        # Получаем каналы и�� базы данных (только с открытыми комментами)
+        # Получаем каналы из базы данных (только с открытыми комментами)
         try:
             db_channels = self.db.get_found_channels(limit=500, only_open_comments=True)
             all_channels = [ch['channel'] for ch in db_channels]
@@ -646,11 +646,11 @@ class BotWorker:
                     # Нет channel_id - бот ещё не вступил, пропускаем без ошибки
                     continue
             
-            # Проверка бана НА ЭТОМ акка��нте в этом канале
+            # Проверка бана НА ЭТОМ аккаунте в этом канале
             if self.db.is_banned(self.account_id, name):
                 continue
             
-            # Проверка блокировки другим аккаунт��м И сразу блокируем если свободен
+            # Проверка блокировки другим аккаунтом И сразу блокируем если свободен
             if self.db.is_channel_locked(self.account_id, name):
                 continue
             
@@ -946,7 +946,7 @@ class BotWorker:
                             break
                     else:
                         self.log(f"⚠️ Не удалось сгенерировать уникальный комментарий для {name}, пропускаю")
-                        # Если был быстрый коммен�� - удаляем заглушку
+                        # Если был быстрый коммент - удаляем заглушку
                         if quick_mode and result:
                             try:
                                 await self.client.delete_messages(channel, [result.id])
@@ -985,7 +985,7 @@ class BotWorker:
                     # Режим прогрева - увеличиваем задержки в 2.5 раза (только для обычного режима)
                     if self._get_cached_setting("warmup_mode", False):
                         delay_mult *= 2.5
-                        self.log(f"🔥 Warmup Mode активен - задержки ув��личены в 2.5 раза")
+                        self.log(f"🔥 Warmup Mode активен - задержки увеличены в 2.5 раза")
                     
                     delay = random.randint(delay_min, delay_max) * delay_mult
                     self.log(f"⏳ Ожидание {delay:.1f} сек. (Режим: {mode})")
@@ -1119,7 +1119,7 @@ class BotWorker:
                     self.is_running = False
                     return
                 
-                # ChatWriteForbidden - н��т прав писать (не бан аккаунта, а ограничение канала)
+                # ChatWriteForbidden - нет прав писать (не бан аккаунта, а ограничение канала)
                 if "chatwriteforbidden" in err_str or "can't write" in err_str:
                     self.log(f"⚠️ Нет прав писать в {name}, помечаю как забанен в канале", "warning")
                     self.db.mark_banned(self.account_id, name)
@@ -1158,7 +1158,7 @@ class BotWorker:
                     self.db.unlock_channel(name)  # Разблокируем канал
                     continue  # НЕ считаем ошибкой аккаунта!
                 
-                # Канал ��едоступен - username не занят или невалидный
+                # Канал недоступен - username не занят или невалидный
                 if "username not occupied" in err_str or "username invalid" in err_str:
                     if is_account_frozen:
                         self.log(f"⚠️ Канал {name} недоступен (аккаунт заморожен), пропускаю", "warning")
@@ -1337,7 +1337,7 @@ class BotWorker:
 {context}
 
 Напиши короткий естественный ответ на последнее сообщение. 
-Отвечай по теме обсужде��ия, как обычный участник чата.
+Отвечай по теме обсуждения, как обычный участник чата.
 Максимум 1-2 предложения."""
                     
                     # Используем специальный метод для чатов (без сохранения истории)
@@ -1399,7 +1399,7 @@ class BotWorker:
             # Пропускаем удалённые
             if self.db.is_channel_deleted(channel):
                 continue
-            # П��опускаем забаненные для этого аккаунта
+            # Пропускаем забаненные для этого аккаунта
             if self.db.is_banned(self.account_id, channel):
                 continue
             channels_to_join.append(channel)
@@ -1606,7 +1606,7 @@ class BotWorker:
             if not all_channels:
                 return
             
-            # Получаем список каналов, в которых аккаунт уже сос��оит
+            # Получаем список каналов, в которых аккаунт уже состоит
             my_dialogs = set()
             try:
                 async for dialog in self.client.iter_dialogs(limit=300):
@@ -1895,7 +1895,7 @@ class BotWorker:
             'я человек', "i'm human", 'start', 'начать'
         ]
         
-        # Извест��ые антиспам-боты (проверяем по имени отправителя)
+        # Известные антиспам-боты (проверяем по имени отправителя)
         antispam_bot_names = [
             'rose', 'combot', 'shieldy', 'captcha', 'guard', 'gatekeeper',
             'verificator', 'антиспам', 'antispam', 'welcome', 'greeter',
@@ -1989,7 +1989,7 @@ class BotWorker:
             'хантер', 'boku no hero', 'hero academia', 'геройская',
             'tokyo ghoul', 'токийский гуль', 'death note', 'тетрадь смерти',
             'fullmetal', 'стальной алхимик', 'sword art', 'мастер меча',
-            'spy x family', 'с��мья шпиона', 'bocchi', 'frieren', 'фрирен',
+            'spy x family', 'семья шпиона', 'bocchi', 'frieren', 'фрирен',
             'oshi no ko', 'звездное дитя', 'blue lock', 'блю лок',
             'dandadan', 'дандадан', 'kaiju', 'кайдзю', 'solo leveling',
             'поднятие уровня', 'mushoku', 'безработн', 'konosuba', 'коносуба',
@@ -2011,7 +2011,7 @@ class BotWorker:
             
             async for dialog in self.client.iter_dialogs():
                 if not self.is_running: break
-                # Проверяем п��дключение в цикле
+                # Проверяем подключение в цикле
                 if not self.client.is_connected():
                     break
                 if isinstance(dialog.entity, Channel):
@@ -2266,7 +2266,7 @@ class BotWorker:
                     if not isinstance(peer, Channel):
                         continue
                     
-                    # Пров��ряем что это broadcast канал, а не группа
+                    # Проверяем что это broadcast канал, а не группа
                     if not getattr(peer, 'broadcast', False):
                         continue
                     

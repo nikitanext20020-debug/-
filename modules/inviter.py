@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from telethon import TelegramClient
 from telethon.tl.functions.channels import GetParticipantsRequest, InviteToChannelRequest
-from telethon.tl.types import ChannelParticipantsSearch
+from telethon.tl.types import ChannelParticipantsSearch, PeerChannel, PeerChat
 from telethon.errors import (
     FloodWaitError, PeerFloodError, ChannelPrivateError,
     UserPrivacyRestrictedError, UserNotMutualContactError,
@@ -36,6 +36,61 @@ class Inviter:
                 pass
         print(f"[Inviter] {message}")
 
+    async def _resolve_entity(self, chat_id_or_username):
+        """
+        Умный резолвинг чата: принимает @username, ссылку t.me/…, инвайт-ссылку
+        или числовой ID. Числовой ID Telethon не может преобразовать в сущность
+        без предварительного «знакомства», поэтому пробуем несколько вариантов и
+        как fallback ищем чат среди диалогов аккаунта.
+        """
+        raw = str(chat_id_or_username).strip()
+
+        # Ссылки t.me / telegram.me → вытаскиваем username или инвайт
+        if "t.me/" in raw or "telegram.me/" in raw:
+            tail = raw.split("/")[-1]
+            raw = tail if tail else raw
+
+        # Приватная инвайт-ссылка (+hash или joinchat) — отдаём как есть
+        if raw.startswith("+") or "joinchat" in str(chat_id_or_username):
+            return await self.client.get_entity(chat_id_or_username)
+
+        # Username (не число) — прямой резолвинг
+        cleaned = raw.lstrip("@")
+        if not cleaned.lstrip("-").isdigit():
+            return await self.client.get_entity(raw)
+
+        # Числовой ID: пробуем разные представления
+        num = int(cleaned)
+        candidates = [num]
+        if num > 0:
+            # ID канала/супергруппы без префикса -100 → достраиваем оба варианта
+            candidates.append(PeerChannel(num))
+            candidates.append(int(f"-100{num}"))
+        else:
+            # Уже с минусом: -100XXXXXXXXXX → извлекаем чистый channel_id
+            s = str(num)
+            if s.startswith("-100"):
+                candidates.append(PeerChannel(int(s[4:])))
+
+        for cand in candidates:
+            try:
+                return await self.client.get_entity(cand)
+            except (ValueError, TypeError):
+                continue
+
+        # Fallback: ищем среди диалогов, где аккаунт уже состоит
+        async for dialog in self.client.iter_dialogs():
+            ent = dialog.entity
+            ent_id = getattr(ent, "id", None)
+            if ent_id is not None and (ent_id == num or int(f"-100{ent_id}") == num):
+                return ent
+
+        # Ничего не вышло — понятная ошибка вместо «Cannot find any entity»
+        raise ValueError(
+            f"Не удалось найти чат по ID {chat_id_or_username}. "
+            "Для числовых ID аккаунт должен состоять в чате — используйте @username или ссылку t.me/…"
+        )
+
     async def parse_users_from_chat(self, chat_id_or_username, limit: int = 200) -> int:
         """
         Парсит пользователей из чата/группы.
@@ -48,7 +103,7 @@ class Inviter:
             Количество спарсенных пользователей
         """
         try:
-            entity = await self.client.get_entity(chat_id_or_username)
+            entity = await self._resolve_entity(chat_id_or_username)
 
             result = await self.client(GetParticipantsRequest(
                 channel=entity,
@@ -109,7 +164,7 @@ class Inviter:
         stats = {'success': 0, 'errors': 0, 'skipped': 0, 'total': 0}
 
         try:
-            channel = await self.client.get_entity(channel_id)
+            channel = await self._resolve_entity(channel_id)
         except Exception as e:
             self._log(f"Не удалось получить канал {channel_id}: {e}", "error")
             return stats

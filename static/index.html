@@ -41,7 +41,8 @@
   </div>
 
   <nav class="tabs">
-    <button class="tab active" data-tab="accounts">Аккаунты</button>
+    <button class="tab active" data-tab="dashboard">Главная</button>
+    <button class="tab" data-tab="accounts">Аккаунты</button>
     <button class="tab" data-tab="behavior">Поведение в чатах</button>
     <button class="tab" data-tab="channels">Каналы</button>
     <button class="tab" data-tab="ownchannels">Мои каналы</button>
@@ -70,8 +71,53 @@
 
 <main>
 
+  <!-- ============================== TAB: ГЛАВНАЯ ============================== -->
+  <section class="tab-pane active" id="tab-dashboard">
+    <div class="page-header">
+      <h2>Панель управления</h2>
+      <div class="page-actions">
+        <span class="muted small" id="dash-updated"></span>
+        <button class="btn btn-ghost" id="btn-refresh-dashboard">Обновить</button>
+      </div>
+    </div>
+
+    <!-- Статусы системы -->
+    <div class="metrics-row">
+      <div class="metric"><span class="metric-label">Всего аккаунтов</span><span class="metric-value" id="dash-accounts">—</span></div>
+      <div class="metric"><span class="metric-label">Запущено воркеров</span><span class="metric-value" id="dash-running">—</span></div>
+      <div class="metric"><span class="metric-label">Health Watcher</span><span class="metric-value" id="dash-watcher">—</span></div>
+      <div class="metric"><span class="metric-label">Глобальная пауза</span><span class="metric-value" id="dash-pause">—</span></div>
+      <div class="metric"><span class="metric-label">Комментариев за 24ч</span><span class="metric-value" id="dash-comments-24h">—</span></div>
+      <div class="metric"><span class="metric-label">Ошибок за сегодня</span><span class="metric-value" id="dash-errors-today">—</span></div>
+    </div>
+
+    <div class="dash-grid">
+      <!-- Аккаунты -->
+      <div class="dash-col">
+        <div class="section-head-row">
+          <h3 class="section-h3">Аккаунты</h3>
+          <button class="btn btn-ghost btn-sm" data-goto-tab="accounts">Управлять</button>
+        </div>
+        <div id="dash-accounts-list" class="dash-acc-list">
+          <div class="empty">Загрузка…</div>
+        </div>
+      </div>
+
+      <!-- Логи -->
+      <div class="dash-col">
+        <div class="section-head-row">
+          <h3 class="section-h3">Последние события</h3>
+          <button class="btn btn-ghost btn-sm" data-goto-tab="logs">Все логи</button>
+        </div>
+        <div id="dash-logs" class="dash-logs">
+          <div class="logs-empty">Загрузка…</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============================== TAB: АККАУНТЫ ============================== -->
-  <section class="tab-pane active" id="tab-accounts">
+  <section class="tab-pane" id="tab-accounts">
     <div class="page-header">
       <h2>Аккаунты</h2>
       <div class="page-actions">
@@ -95,7 +141,8 @@
     <div class="page-header">
       <h2>Поведение в чатах</h2>
       <div class="page-actions">
-        <span class="muted small" id="behavior-saved-hint"></span>
+        <span class="muted small" id="behavior-saved-hint">Переключатели сохраняются автоматически</span>
+        <button class="btn btn-primary" id="btn-save-behavior">Сохранить всё</button>
       </div>
     </div>
 
@@ -331,7 +378,14 @@
             <div class="form-row"><label>Основа для @username</label>
               <input type="text" name="username_base" placeholder="mychannel" required /></div>
             <div class="form-row"><label>Тема (для авто-постов)</label>
-              <input type="text" name="topic" placeholder="крипта, новости…" required /></div>
+              <input type="text" name="topic" placeholder="крипта, новости…" /></div>
+          </div>
+          <div class="form-row inline-toggle">
+            <label class="switch">
+              <input type="checkbox" name="publish_warmup" />
+              <span class="slider"></span>
+            </label>
+            <span class="muted small">Сразу опубликовать авто-посты по теме (иначе канал создаётся пустым)</span>
           </div>
           <div class="form-row"><label>Аватарка (необязательно)</label>
             <input type="file" name="avatar" accept="image/*" /></div>
@@ -551,7 +605,7 @@
         <thead>
           <tr><th>Канал</th><th>Текст</th><th>Тип</th><th>Когда</th><th></th></tr>
         </thead>
-        <tbody id="comments-tbody"><tr><td colspan="5" class="empty">Загрузка��</td></tr></tbody>
+        <tbody id="comments-tbody"><tr><td colspan="5" class="empty">Загрузка…</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -806,7 +860,7 @@
             <input type="file" name="files" accept=".session" multiple required /></div>
 
           <div id="api-fields-note" class="form-row hidden">
-            <p class="muted small">API ID / Hash уже сохранены — поля можно не запол��ять.</p>
+            <p class="muted small">API ID / Hash уже сохранены — поля можно не заполнять.</p>
           </div>
 
           <details id="api-fields" class="api-details">
