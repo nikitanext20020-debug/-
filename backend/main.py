@@ -987,47 +987,6 @@ async def get_all_pending_requests():
         "total_pending": len(pending)
     }
 
-@app.delete("/discovery/channels/{channel:path}")
-async def delete_discovered_channel(channel: str):
-    """Удаляет канал из базы найденных каналов (принудительно, включая manual)"""
-    import urllib.parse
-    
-    # Декодируем URL-encoded строку
-    channel = urllib.parse.unquote(channel)
-    original_channel = channel  # Сохраняем оригинал для поиска в базе
-    
-    # Нормализуем канал - извлекаем хэш из полной ссылки
-    normalized = channel
-    if 't.me/' in normalized:
-        # Извлекаем часть после t.me/
-        parts = normalized.split('t.me/')
-        if len(parts) > 1:
-            normalized = parts[-1]
-    
-    # Убираем joinchat/ если есть
-    if normalized.startswith('joinchat/'):
-        normalized = '+' + normalized[9:]
-    
-    normalized = normalized.lstrip('@')
-    
-    try:
-        # Пробуем удалить по оригинальному значению (как в базе)
-        deleted = db.delete_found_channel(original_channel, force=True)
-        
-        # Если не удалилось - пробуем по нормализованному
-        if not deleted:
-            db.delete_found_channel(normalized, force=True)
-        
-        return {"status": "deleted", "channel": channel}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/discovery/cleanup")
-async def cleanup_closed_channels():
-    """Удаляет все каналы с закрытыми комментами (кроме manual)"""
-    count = db.cleanup_closed_channels()
-    return {"deleted": count}
-
 @app.post("/discovery/channels/{channel:path}/pin")
 async def pin_channel(channel: str):
     """Ставит «замочек» — канал не удаляется авточисткой и остаётся в общей базе."""
@@ -1047,6 +1006,47 @@ async def unpin_channel(channel: str):
     if not ok:
         raise HTTPException(status_code=404, detail="Канал не найден")
     return {"status": "unpinned", "channel": channel}
+
+@app.delete("/discovery/channels/{channel:path}")
+async def delete_discovered_channel(channel: str):
+    """Удаляет канал из базы найденных каналов (принудительно, включая manual)"""
+    import urllib.parse
+
+    # Декодируем URL-encoded строку
+    channel = urllib.parse.unquote(channel)
+    original_channel = channel  # Сохраняем оригинал для поиска в базе
+
+    # Нормализуем канал - извлекаем хэш из полной ссылки
+    normalized = channel
+    if 't.me/' in normalized:
+        # Извлекаем часть после t.me/
+        parts = normalized.split('t.me/')
+        if len(parts) > 1:
+            normalized = parts[-1]
+
+    # Убираем joinchat/ если есть
+    if normalized.startswith('joinchat/'):
+        normalized = '+' + normalized[9:]
+
+    normalized = normalized.lstrip('@')
+
+    try:
+        # Пробуем удалить по оригинальному значению (как в базе)
+        deleted = db.delete_found_channel(original_channel, force=True)
+
+        # Если не удалилось - пробуем по нормализованному
+        if not deleted:
+            db.delete_found_channel(normalized, force=True)
+
+        return {"status": "deleted", "channel": channel}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/discovery/cleanup")
+async def cleanup_closed_channels():
+    """Удаляет все каналы с закрытыми комментами (кроме manual)"""
+    count = db.cleanup_closed_channels()
+    return {"deleted": count}
 
 @app.post("/discovery/cleanup-unpinned")
 async def cleanup_unpinned_channels(older_than_days: Optional[int] = None):
