@@ -1510,9 +1510,9 @@ document.getElementById('ms-acc-select')?.addEventListener('change', () => MassS
 document.getElementById('form-ms-dm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = MassSend.accId();
-  if (!id) { toast('Выберите аккаунт', 'error'); return; }
+  if (!id) { toast('Выбе��ите аккаунт', 'error'); return; }
   const user_ids = MassSend.parseIds(e.target.user_ids.value).map(Number).filter(n => !Number.isNaN(n));
-  if (!user_ids.length) { toast('Укажите ID пользователей', 'error'); return; }
+  if (!user_ids.length) { toast('Укажите ID по��ьзователей', 'error'); return; }
   const body = {
     user_ids,
     message_template: e.target.message_template.value,
@@ -1671,6 +1671,8 @@ async function boot() {
     if (document.querySelector('.tab-pane.active').id === 'tab-accounts') Accounts.refresh();
   }, 10000);
   Logs.startAuto();
+  Dashboard.refresh();
+  Dashboard.startAuto();
   // ленивая загрузка каналов при первом переключении на вкладку
 }
 
