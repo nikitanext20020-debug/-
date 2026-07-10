@@ -550,7 +550,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить проф����ль")
+            raise HTTPException(status_code=500, detail="Не удалось получить проф������ль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -778,6 +778,15 @@ async def get_settings():
         # === Health watcher ===
         "channel_watcher_enabled": db.get_setting("channel_watcher_enabled", True),
         "channel_watcher_interval_minutes": db.get_setting("channel_watcher_interval_minutes", 30),
+        # === Авто-инвайт (фоновый) ===
+        "auto_invite_enabled": db.get_setting("auto_invite_enabled", False),
+        "auto_invite_target_channel": db.get_setting("auto_invite_target_channel", ""),
+        "auto_invite_source_chats": db.get_setting("auto_invite_source_chats", ""),
+        "auto_invite_per_cycle": db.get_setting("auto_invite_per_cycle", 3),
+        "auto_invite_daily_limit": db.get_setting("auto_invite_daily_limit", Config.INVITER_DAILY_LIMIT),
+        "auto_invite_interval_cycles": db.get_setting("auto_invite_interval_cycles", 5),
+        # === Проверка публикации комментариев (детект теневого бана) ===
+        "verify_comment_published": db.get_setting("verify_comment_published", True),
         # === Глобальная пауза ===
         "global_pause": global_pause,
     }
@@ -819,6 +828,15 @@ class SettingsUpdate(BaseModel):
     # === Health watcher ===
     channel_watcher_enabled: Optional[bool] = None
     channel_watcher_interval_minutes: Optional[int] = None
+    # === Авто-инвайт (фоновый) ===
+    auto_invite_enabled: Optional[bool] = None
+    auto_invite_target_channel: Optional[str] = None
+    auto_invite_source_chats: Optional[str] = None
+    auto_invite_per_cycle: Optional[int] = None
+    auto_invite_daily_limit: Optional[int] = None
+    auto_invite_interval_cycles: Optional[int] = None
+    # === Проверка публикации комментариев (детект теневого бана) ===
+    verify_comment_published: Optional[bool] = None
     # === Глобальная пауза (через единый сеттер) ===
     global_pause: Optional[bool] = None
 
@@ -1115,7 +1133,7 @@ async def recheck_all_closed_channels():
             else:
                 results["still_closed"] += 1
             
-            await asyncio.sleep(0.5)  # Небольшая задержка между проверками
+            await asyncio.sleep(0.5)  # Небольшая задержка межд�� проверками
         except Exception as e:
             results["errors"] += 1
     

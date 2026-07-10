@@ -554,12 +554,34 @@ const Channels = {
         <td class="muted small">${escape(c.source || '—')}</td>
         <td class="muted small">${escape((c.last_checked || '').slice(0, 16))}</td>
         <td>
+          <button class="btn btn-ghost btn-sm ${c.is_pinned ? 'pinned' : ''}" data-pin="${escape(c.channel)}" data-pinned="${c.is_pinned ? '1' : '0'}" title="${c.is_pinned ? 'Закреплён (защищён от очистки) — нажмите чтобы открепить' : 'Закрепить (защитить от очистки)'}">${c.is_pinned ? '🔒' : '🔓'}</button>
           <button class="btn btn-ghost btn-sm" data-recheck="${escape(c.channel)}" title="Перепроверить">↻</button>
           <button class="btn btn-ghost btn-sm" data-comment="${escape(c.channel)}" title="Комментить сейчас">✎</button>
           <button class="btn btn-ghost btn-sm" data-del="${escape(c.channel)}" title="Удалить">×</button>
         </td>
       </tr>
     `).join('');
+    tbody.querySelectorAll('[data-pin]').forEach(b => {
+      b.addEventListener('click', async () => {
+        const channel = b.dataset.pin;
+        const isPinned = b.dataset.pinned === '1';
+        b.disabled = true;
+        try {
+          const path = `/discovery/channels/${encodeURIComponent(channel)}/pin`;
+          if (isPinned) {
+            await API.del(path);
+            toast(`@${channel} откреплён`, 'ok');
+          } else {
+            await API.post(path);
+            toast(`@${channel} закреплён (защищён от очистки)`, 'ok');
+          }
+          // Обновляем локальные данные и перерисовываем
+          const item = this.data.find(c => c.channel === channel);
+          if (item) item.is_pinned = isPinned ? 0 : 1;
+          this.render();
+        } catch (e) { toast(e.message, 'error'); b.disabled = false; }
+      });
+    });
     tbody.querySelectorAll('[data-del]').forEach(b => {
       b.addEventListener('click', async () => {
         if (!confirm(`Удалить @${b.dataset.del}?`)) return;
@@ -601,6 +623,26 @@ document.getElementById('btn-cleanup-channels').addEventListener('click', async 
     toast('Очищено', 'ok');
     Channels.refresh();
   } catch (e) { toast(e.message, 'error'); }
+});
+document.getElementById('btn-cleanup-unpinned')?.addEventListener('click', async () => {
+  const daysEl = document.getElementById('cleanup-unpinned-days');
+  const raw = (daysEl?.value || '').trim();
+  const days = raw === '' ? null : parseInt(raw, 10);
+  const msg = days && days > 0
+    ? `Удалить все незакреплённые каналы старше ${days} дн.? Закреплённые (🔒) останутся.`
+    : 'Удалить ВСЕ незакреплённые каналы? Закреплённые (🔒) останутся.';
+  if (!confirm(msg)) return;
+  const btn = document.getElementById('btn-cleanup-unpinned');
+  btn.disabled = true;
+  try {
+    const path = days && days > 0
+      ? `/discovery/cleanup-unpinned?older_than_days=${days}`
+      : '/discovery/cleanup-unpinned';
+    const r = await API.post(path);
+    toast(`Удалено незакреплённых каналов: ${r && r.deleted != null ? r.deleted : 0}`, 'ok');
+    Channels.refresh();
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; }
 });
 document.getElementById('channels-search').addEventListener('input', () => Channels.render());
 
@@ -1510,9 +1552,9 @@ document.getElementById('ms-acc-select')?.addEventListener('change', () => MassS
 document.getElementById('form-ms-dm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = MassSend.accId();
-  if (!id) { toast('Выбе��ите аккаунт', 'error'); return; }
+  if (!id) { toast('Выбе����ите аккаунт', 'error'); return; }
   const user_ids = MassSend.parseIds(e.target.user_ids.value).map(Number).filter(n => !Number.isNaN(n));
-  if (!user_ids.length) { toast('Укажите ID по��ьзователей', 'error'); return; }
+  if (!user_ids.length) { toast('Укажите ID ��о��ьзователей', 'error'); return; }
   const body = {
     user_ids,
     message_template: e.target.message_template.value,

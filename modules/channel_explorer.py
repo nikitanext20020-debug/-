@@ -7,7 +7,7 @@ from typing import List, Dict, Set
 from telethon import functions, types
 from telethon import TelegramClient
 from telethon.tl.functions.messages import GetDiscussionMessageRequest
-from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.channels import GetFullChannelRequest, GetChannelRecommendationsRequest
 from telethon.errors import RPCError
 from config import Config
 from utils.database import Database
@@ -235,6 +235,66 @@ class ChannelExplorer:
         except:
             return set()
 
+    async def discover_from_recommendations(self, source_channel: str):
+        """
+        Использует нативные рекомендации Telegram («похожие каналы»)
+        через GetChannelRecommendationsRequest. Доступно не для всех каналов,
+        поэтому всё обёрнуто в try/except.
+        """
+        if not self._is_client_connected():
+            return 0
+
+        newly_discovered = 0
+        min_channel_subs = self.db.get_setting("min_channel_subs", 20000) if self.db else 20000
+
+        try:
+            entity = await self.client.get_entity(source_channel)
+            result = await self.client(GetChannelRecommendationsRequest(channel=entity))
+            similar = getattr(result, 'chats', []) or []
+            self._log(f"🤝 Telegram рекомендует {len(similar)} похожих каналов для {source_channel}")
+
+            for chat in similar:
+                if self._stopped or not self._is_client_connected():
+                    break
+
+                username = getattr(chat, 'username', None)
+                if not username:
+                    # приватные/без username рекомендации пропускаем — их не проверить
+                    continue
+
+                try:
+                    res = await self.check_channel_viability(chat)
+                    if res.get('reason') == 'Client disconnected':
+                        break
+
+                    # Отсекаем маленькие каналы
+                    if res.get('subs', 0) > 0 and res.get('subs', 0) < min_channel_subs:
+                        continue
+
+                    if res.get('ok'):
+                        is_new = self.db.add_found_channel(
+                            channel=username.lstrip('@'),
+                            title=res['title'],
+                            source='recommend',
+                            subs=res['subs'],
+                            views=res['avg_views'],
+                            can_comment=res['can_comment'],
+                            min_subs=min_channel_subs
+                        )
+                        if res['can_comment'] and is_new:
+                            self._log(f"🌟 Рекомендация: @{username} ({res['subs']} сабов, комменты открыты)")
+                            newly_discovered += 1
+
+                    await asyncio.sleep(2)
+                except Exception:
+                    continue
+
+            return newly_discovered
+        except Exception as e:
+            # Метод доступен не для всех каналов — это нормально
+            self._log(f"ℹ️ Рекомендации недоступны для {source_channel}: {e}", "info")
+            return 0
+
     async def run_discovery_cycle(self):
         """Запускает полный цикл поиска по активным каналам"""
         # Проверяем подключение клиента
@@ -245,7 +305,13 @@ class ChannelExplorer:
         # Берём каналы из БД
         all_channels = self.db.get_found_channels(limit=20, only_open_comments=True)
         seeds = [ch['channel'] for ch in all_channels[:10]]
-        
+
+        # Приоритетные seed'ы для рекомендаций — закреплённые (замочек) каналы:
+        # они наиболее релевантны тематике, поэтому их "похожие" ценнее всего.
+        pinned_seeds = [ch['channel'] for ch in all_channels if ch.get('is_pinned')]
+        # Плюс несколько обычных, чтобы охват был шире
+        recommend_seeds = pinned_seeds[:5] if pinned_seeds else seeds[:3]
+
         total_new = 0
         for seed in seeds:
             # Проверяем остановку и подключение перед каждым каналом
@@ -253,5 +319,11 @@ class ChannelExplorer:
                 self._log("⚠️ Discovery cycle прерван (клиент отключён)", "warning")
                 break
             total_new += await self.discover_from_posts(seed)
-        
+
+        # Дополняем поиск нативными рекомендациями Telegram («похожие каналы»)
+        for seed in recommend_seeds:
+            if self._stopped or not self._is_client_connected():
+                break
+            total_new += await self.discover_from_recommendations(seed)
+
         return total_new

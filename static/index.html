@@ -263,6 +263,10 @@
         <button class="btn btn-ghost" id="btn-join-private">Вступить в приватные</button>
         <button class="btn btn-ghost" id="btn-reset-closed">Сбросить закрытые</button>
         <button class="btn btn-ghost" id="btn-cleanup-channels">Очистить закрытые</button>
+        <span class="cleanup-unpinned">
+          <input type="number" id="cleanup-unpinned-days" min="0" placeholder="дней" title="Удалять незакреплённые старше N дней (пусто = все)" />
+          <button class="btn btn-ghost" id="btn-cleanup-unpinned" title="Удалить все каналы без замочка">Очистить незакреплённые</button>
+        </span>
       </div>
     </div>
 
@@ -485,6 +489,51 @@
             <button class="btn btn-primary" type="submit">Запустить инвайт</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <h3 class="section-h3">Авто-инвайт (в фоновом цикле воркера)</h3>
+    <p class="muted small">Когда включено, запущенный аккаунт сам парсит участников из чатов-источников и понемногу приглашает их в целевой канал каждые несколько циклов. Изменения сохраняются автоматически.</p>
+    <div class="toggle-group">
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">Включить авто-инвайт</div>
+          <div class="toggle-desc">Фоновое приглашение участников из источников в целевой канал.</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-setting="auto_invite_enabled" /><span class="slider"></span></label>
+      </div>
+    </div>
+    <div class="form-grid-2" style="margin-top:14px">
+      <div class="form-row">
+        <label>Целевой канал/группа</label>
+        <input type="text" data-setting="auto_invite_target_channel" placeholder="@mychannel или -1001234567890" />
+      </div>
+      <div class="form-row">
+        <label>Приглашать за цикл</label>
+        <input type="number" data-setting="auto_invite_per_cycle" min="1" max="50" placeholder="3" />
+      </div>
+      <div class="form-row">
+        <label>Дневной лимит инвайтов</label>
+        <input type="number" data-setting="auto_invite_daily_limit" min="1" max="200" placeholder="40" />
+      </div>
+      <div class="form-row">
+        <label>Интервал (каждые N циклов)</label>
+        <input type="number" data-setting="auto_invite_interval_cycles" min="1" max="100" placeholder="5" />
+      </div>
+    </div>
+    <div class="form-row" style="margin-top:12px">
+      <label>Чаты-источники (по одному в строке)</label>
+      <textarea data-setting="auto_invite_source_chats" rows="3" placeholder="@somechat&#10;@anotherchat"></textarea>
+    </div>
+
+    <h3 class="section-h3">Проверка публикации комментариев</h3>
+    <div class="toggle-group">
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <div class="toggle-title">Проверять, что комментарий опубликован</div>
+          <div class="toggle-desc">Детект теневого бана: после отправки бот проверяет, что комментарий реально виден.</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-setting="verify_comment_published" /><span class="slider"></span></label>
       </div>
     </div>
   </section>
