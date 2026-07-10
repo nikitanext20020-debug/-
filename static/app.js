@@ -678,7 +678,7 @@ function bindChannelMaintenance(btnId, path, confirmMsg) {
     finally { el.disabled = false; el.textContent = label; }
   });
 }
-bindChannelMaintenance('btn-recheck-closed', '/discovery/channels/recheck-all-closed', 'Перепроверить все каналы с закр��тыми комментариями? Может занять время.');
+bindChannelMaintenance('btn-recheck-closed', '/discovery/channels/recheck-all-closed', 'Перепроверить все каналы с закрытыми комментариями? Может занять время.');
 bindChannelMaintenance('btn-join-private', '/discovery/channels/join-private', 'Отправить заявки на вступление во все приватные каналы?');
 bindChannelMaintenance('btn-reset-closed', '/discovery/channels/reset-closed', 'Сбросить статус «закрытые» у каналов?');
 
@@ -1473,7 +1473,7 @@ const Inviter = {
   async loadChats() {
     const id = this.accId();
     const sel = document.getElementById('inv-chats-select');
-    if (!id) { sel.innerHTML = '<option value="">Вы��ерите аккаунт</option>'; return; }
+    if (!id) { sel.innerHTML = '<option value="">Выберите аккаунт</option>'; return; }
     sel.innerHTML = '<option value="">— загрузка —</option>';
     try {
       const chats = await API.get(`/accounts/${id}/inviter/chats`);
@@ -1541,7 +1541,7 @@ const MassSend = {
         </tr>`;
       }));
       tbody.innerHTML = rows.join('');
-    } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty">О��ибка: ${escape(e.message)}</td></tr>`; }
+    } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty">Ошибка: ${escape(e.message)}</td></tr>`; }
   },
   parseIds(raw) {
     return (raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
@@ -1552,9 +1552,9 @@ document.getElementById('ms-acc-select')?.addEventListener('change', () => MassS
 document.getElementById('form-ms-dm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = MassSend.accId();
-  if (!id) { toast('Выбе����ите аккаунт', 'error'); return; }
+  if (!id) { toast('Выберите аккаунт', 'error'); return; }
   const user_ids = MassSend.parseIds(e.target.user_ids.value).map(Number).filter(n => !Number.isNaN(n));
-  if (!user_ids.length) { toast('Укажите ID ��о��ьзователей', 'error'); return; }
+  if (!user_ids.length) { toast('Укажите ID пользователей', 'error'); return; }
   const body = {
     user_ids,
     message_template: e.target.message_template.value,

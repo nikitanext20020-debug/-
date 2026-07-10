@@ -136,13 +136,13 @@ class Config:
     CHAT_RESPOND_TO_DIRECT = True  # Отвечать на прямые обращения
     CHAT_PERIODIC_MESSAGES_ENABLED = True  # Периодически писать сообщения в чаты
     CHAT_PERIODIC_INTERVAL_MIN = 1800  # Минимальный интервал между сообщениями (секунды, 30 минут)
-    CHAT_PERIODIC_INTERVAL_MAX = 3600  # Максимальный интерва�� между сообщениями (секунды, 1 час)
+    CHAT_PERIODIC_INTERVAL_MAX = 3600  # Максимальный интервал между сообщениями (секунды, 1 час)
     CHAT_ACTIVE_CHATS_FILE = 'data/active_chats.txt'  # Файл со списком активных чатов
     
     # Настройки поиска
     SEARCH_ENABLED = True
     SEARCH_AUTO_ADD_CHANNELS = True  # Автоматически добавлять найденные каналы
-    SEARCH_AUTO_ADD_TO_ACTIVE = True  # Автоматически добавлять найденные каналы в активные ��ля комментирования
+    SEARCH_AUTO_ADD_TO_ACTIVE = True  # Автоматически добавлять найденные каналы в активные для комментирования
     SEARCH_INTERVAL_CYCLES = 20  # Как часто искать каналы (каждые N циклов)
     
     # Настройки реакций

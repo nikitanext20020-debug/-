@@ -211,7 +211,7 @@ class CommentGenerator:
 
         except Exception as e:
             self.last_error = str(e)
-            print(f"Ошибка генерации коммент��рия: {e}")
+            print(f"Ошибка генерации комментария: {e}")
             return ""  # Лучше не комментировать чем писать шаблон
     
     def generate_comment(

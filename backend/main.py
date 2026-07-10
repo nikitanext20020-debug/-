@@ -550,7 +550,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить проф������ль")
+            raise HTTPException(status_code=500, detail="Не удалось получить профиль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1133,7 +1133,7 @@ async def recheck_all_closed_channels():
             else:
                 results["still_closed"] += 1
             
-            await asyncio.sleep(0.5)  # Небольшая задержка межд�� проверками
+            await asyncio.sleep(0.5)  # Небольшая задержка между проверками
         except Exception as e:
             results["errors"] += 1
     
@@ -1393,7 +1393,7 @@ async def fix_private_channel_titles():
         # Небольшая задержка
         await asyncio.sleep(0.3)
     
-    print(f"[fix-titles] Готово! ��справ��ено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
+    print(f"[fix-titles] Готово! Исправлено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
     return {"status": "ok", "fixed": fixed, "skipped": skipped, "errors": errors, "total": len(private_channels)}
 
 @app.post("/discovery/channels/{channel}/comment-now")
@@ -1436,7 +1436,7 @@ async def comment_now(channel: str):
     ]
     
     async def send_comment_with_worker(acc_id, worker):
-        """Пытаетс�� отправить комментарий через конкретный воркер"""
+        """Пытается отправить комментарий через конкретный воркер"""
         from telethon.tl.functions.messages import GetDiscussionMessageRequest
         from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest
         from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -1575,7 +1575,7 @@ async def comment_now(channel: str):
         # Формируем ссылку на комментарий
         if normalized.startswith('+'):
             # Приватный канал - ссылка через c/channel_id
-            # ID канала ну��но преобразовать (убрать -100 префикс)
+            # ID канала нужно преобразовать (убрать -100 префикс)
             channel_id = entity.id
             if channel_id < 0:
                 channel_id = int(str(channel_id).replace('-100', ''))
@@ -1899,7 +1899,7 @@ async def reset_closed_channels():
 async def reset_account_bans(account_id: int):
     """
     Удаляет записи о банах для конкретного аккаунта.
-    Полезно для новых аккаунтов, чтобы они не пропускали каналы, 
+    Полезно для новых аккаунтов, чтобы они не пропускали каналы,
     в которых был забанен старый аккаунт.
     """
     try:
