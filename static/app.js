@@ -48,6 +48,11 @@ const API = {
 // ============ TOAST ============
 const toastEl = document.getElementById('toast');
 function toast(msg, kind = '') {
+  // Дублируем в консоль браузера, чтобы события были видны и там
+  const tag = kind === 'error' ? 'ERROR' : (kind === 'ok' ? 'OK' : 'INFO');
+  const line = `[panel][${tag}] ${msg}`;
+  if (kind === 'error') console.error(line); else console.log(line);
+  if (!toastEl) return;
   toastEl.className = 'toast';
   toastEl.classList.add('show');
   if (kind) toastEl.classList.add(`toast-${kind}`);
@@ -116,6 +121,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     btn.classList.add('active');
     const id = 'tab-' + btn.dataset.tab;
     document.getElementById(id).classList.add('active');
+    if (btn.dataset.tab === 'dashboard') Dashboard.refresh();
     if (btn.dataset.tab === 'channels') { Channels.refresh(); Pending.refresh(); }
     if (btn.dataset.tab === 'logs') Logs.refresh();
     if (btn.dataset.tab === 'accounts') Accounts.refresh();
@@ -630,7 +636,7 @@ function bindChannelMaintenance(btnId, path, confirmMsg) {
     finally { el.disabled = false; el.textContent = label; }
   });
 }
-bindChannelMaintenance('btn-recheck-closed', '/discovery/channels/recheck-all-closed', 'Перепроверить все каналы с закрытыми комментариями? Может занять время.');
+bindChannelMaintenance('btn-recheck-closed', '/discovery/channels/recheck-all-closed', 'Перепроверить все каналы с закр��тыми комментариями? Может занять время.');
 bindChannelMaintenance('btn-join-private', '/discovery/channels/join-private', 'Отправить заявки на вступление во все приватные каналы?');
 bindChannelMaintenance('btn-reset-closed', '/discovery/channels/reset-closed', 'Сбросить статус «закрытые» у каналов?');
 
@@ -856,6 +862,121 @@ document.querySelectorAll('#logs-badges .log-badge').forEach(b => {
   });
 });
 
+// ============ DASHBOARD (ГЛАВНАЯ) ============
+function gotoTab(name) {
+  const btn = document.querySelector(`.tab[data-tab="${name}"]`);
+  if (btn) btn.click();
+}
+
+const Dashboard = {
+  _timer: null,
+
+  async refresh() {
+    const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+
+    // Аккаунты + статусы воркеров
+    let accounts = [];
+    try {
+      accounts = await API.get('/accounts');
+      Accounts.data = accounts;
+    } catch (e) { console.log('[v0] dashboard accounts error:', e.message); }
+
+    const running = accounts.filter(a => a.is_running).length;
+    setText('dash-accounts', accounts.length);
+    setText('dash-running', `${running}/${accounts.length}`);
+
+    // Здоровье системы
+    try {
+      const h = await API.get('/health');
+      setText('dash-watcher', h.watcher_running ? 'активен' : 'остановлен');
+      setText('dash-pause', h.global_pause ? 'ВКЛ' : 'выкл');
+    } catch { /* ignore */ }
+
+    // Активность за 24ч
+    try {
+      const s = await API.get('/stats/24h');
+      setText('dash-comments-24h', (s.comments_24h ?? 0).toLocaleString('ru-RU'));
+      setText('dash-errors-today', (s.errors_today ?? 0).toLocaleString('ru-RU'));
+    } catch { /* ignore */ }
+
+    this.renderAccounts(accounts);
+    await this.renderLogs();
+    setText('dash-updated', 'обновлено ' + new Date().toLocaleTimeString('ru-RU'));
+  },
+
+  renderAccounts(accounts) {
+    const box = document.getElementById('dash-accounts-list');
+    if (!box) return;
+    if (!accounts.length) {
+      box.innerHTML = `<div class="empty">Нет аккаунтов. Импортируйте .session-файл во вкладке «Аккаунты».</div>`;
+      return;
+    }
+    box.innerHTML = accounts.map(a => {
+      const status = a.is_running ? 'running' : (a.status || 'stopped');
+      const comments = (a.stats && (a.stats.total_comments_sent || a.stats.comments_sent)) || 0;
+      return `
+        <div class="dash-acc-row">
+          <span class="account-status-dot ${escape(status)}" title="${escape(status)}"></span>
+          <div class="dash-acc-main">
+            <div class="dash-acc-phone">${escape(a.phone || '—')}</div>
+            <div class="muted small">${escape(a.health_status || status)} · ${comments} комм.</div>
+          </div>
+          <button class="btn btn-sm ${a.is_running ? 'btn-ghost' : 'btn-primary'}"
+                  data-dash-act="${a.is_running ? 'stop' : 'start'}" data-id="${a.id}">
+            ${a.is_running ? 'Стоп' : 'Старт'}
+          </button>
+        </div>`;
+    }).join('');
+    box.querySelectorAll('[data-dash-act]').forEach(b => {
+      b.addEventListener('click', async () => {
+        const id = +b.dataset.id;
+        const act = b.dataset.act || b.dataset.dashAct;
+        b.disabled = true;
+        try {
+          await API.post(`/accounts/${id}/${act}`);
+          toast(act === 'start' ? 'Воркер запущен' : 'Воркер остановлен', 'ok');
+          this.refresh();
+        } catch (e) { toast(e.message, 'error'); b.disabled = false; }
+      });
+    });
+  },
+
+  async renderLogs() {
+    const box = document.getElementById('dash-logs');
+    if (!box) return;
+    try {
+      const data = await API.get('/logs?limit=25');
+      const list = Array.isArray(data) ? data : (data.logs || []);
+      if (!list.length) { box.innerHTML = '<div class="logs-empty">— нет записей —</div>'; return; }
+      box.innerHTML = list.map(l => {
+        const ts = (l.timestamp || '').slice(11, 19) || '--:--:--';
+        let level = (l.level || 'info').toLowerCase();
+        if (!['success', 'info', 'warning', 'error', 'debug', 'critical'].includes(level)) level = 'info';
+        return `<div class="log-line ${level}">
+          <span class="log-time">${escape(ts)}</span>
+          <span class="log-level ${level}">${escape(level)}</span>
+          <span class="log-msg">${escape(l.message || '')}</span>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      box.innerHTML = `<div class="logs-empty">Ошибка: ${escape(e.message)}</div>`;
+    }
+  },
+
+  startAuto() {
+    this.stopAuto();
+    this._timer = setInterval(() => {
+      const active = document.getElementById('tab-dashboard')?.classList.contains('active');
+      if (active) this.refresh();
+    }, 8000);
+  },
+  stopAuto() { if (this._timer) clearInterval(this._timer); this._timer = null; },
+};
+document.getElementById('btn-refresh-dashboard')?.addEventListener('click', () => Dashboard.refresh());
+document.querySelectorAll('[data-goto-tab]').forEach(b => {
+  b.addEventListener('click', () => gotoTab(b.dataset.gotoTab));
+});
+
 // ============ HEADER STATUS ============
 async function refreshStatus() {
   try {
@@ -919,6 +1040,8 @@ const Settings = {
     // Глобальная пауза
     const pause = document.getElementById('global-pause-toggle');
     if (pause && 'global_pause' in data) pause.checked = !!data.global_pause;
+    // Включаем автосохранение всех полей
+    this.wireAutoSave();
   },
 
   collect() {
@@ -947,12 +1070,62 @@ const Settings = {
     btn.textContent = 'Сохранение…';
     try {
       await API.post('/settings', payload);
-      toast('Настройки сохранены', 'ok');
+      toast('Все настройки сохранены', 'ok');
     } catch (e) {
       toast(e.message, 'error');
     } finally {
       btn.disabled = false;
       btn.textContent = label;
+    }
+  },
+
+  // Человекочитаемое название поля для уведомлений
+  fieldLabel(el) {
+    const row = el.closest('.toggle-row, .form-row');
+    if (row) {
+      const t = row.querySelector('.toggle-title, label');
+      if (t) return t.textContent.trim().replace(/\s+/g, ' ');
+    }
+    return el.dataset.setting;
+  },
+
+  // Автосохранение одного поля при изменении
+  async autoSave(el) {
+    const key = el.dataset.setting;
+    let value;
+    if (el.type === 'checkbox') {
+      value = el.checked;
+    } else if (el.type === 'number') {
+      const raw = el.value.trim();
+      if (raw === '') return;                 // пустое число не трогаем
+      const num = Number(raw);
+      if (Number.isNaN(num)) { toast('Некорректное число', 'error'); return; }
+      value = num;
+    } else {
+      value = el.value;
+    }
+    const name = this.fieldLabel(el);
+    try {
+      await API.post('/settings', { [key]: value });
+      if (el.type === 'checkbox') {
+        toast(`«${name}» — ${value ? 'включено' : 'выключено'}`, 'ok');
+      } else {
+        toast(`«${name}» сохранено`, 'ok');
+      }
+    } catch (e) {
+      toast(`Не удалось сохранить «${name}»: ${e.message}`, 'error');
+      // Откатываем визуальное состояние переключателя
+      if (el.type === 'checkbox') el.checked = !el.checked;
+    }
+  },
+
+  // Навешивает автосохранение на все поля с data-setting
+  wireAutoSave() {
+    for (const el of this.fields()) {
+      if (el.dataset.autosaveWired) continue;
+      el.dataset.autosaveWired = '1';
+      const evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'change';
+      el.addEventListener(evt, () => this.autoSave(el));
     }
   },
 
@@ -978,6 +1151,7 @@ const Settings = {
 };
 
 document.getElementById('btn-save-settings')?.addEventListener('click', () => Settings.save());
+document.getElementById('btn-save-behavior')?.addEventListener('click', () => Settings.save());
 document.getElementById('btn-test-ai')?.addEventListener('click', () => Settings.testAI());
 document.getElementById('global-pause-toggle')?.addEventListener('change', async (e) => {
   try {
@@ -1257,7 +1431,7 @@ const Inviter = {
   async loadChats() {
     const id = this.accId();
     const sel = document.getElementById('inv-chats-select');
-    if (!id) { sel.innerHTML = '<option value="">Выберите аккаунт</option>'; return; }
+    if (!id) { sel.innerHTML = '<option value="">Вы��ерите аккаунт</option>'; return; }
     sel.innerHTML = '<option value="">— загрузка —</option>';
     try {
       const chats = await API.get(`/accounts/${id}/inviter/chats`);
@@ -1325,7 +1499,7 @@ const MassSend = {
         </tr>`;
       }));
       tbody.innerHTML = rows.join('');
-    } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty">Ошибка: ${escape(e.message)}</td></tr>`; }
+    } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty">О��ибка: ${escape(e.message)}</td></tr>`; }
   },
   parseIds(raw) {
     return (raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
@@ -1428,6 +1602,7 @@ document.getElementById('form-create-channel')?.addEventListener('submit', async
     about: e.target.about.value.trim(),
     username_base: e.target.username_base.value.trim(),
     topic: e.target.topic.value.trim(),
+    publish_warmup: !!e.target.publish_warmup?.checked,
   };
   const f = e.target.avatar.files[0];
   if (f) body.avatar_base64 = await fileToBase64(f);

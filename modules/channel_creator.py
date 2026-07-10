@@ -258,7 +258,8 @@ class ChannelCreator:
         return posted
 
     async def create_and_setup_channel(self, title: str, about: str, username_base: str,
-                                       topic: str, avatar_bytes: bytes = None) -> Optional[Dict]:
+                                       topic: str, avatar_bytes: bytes = None,
+                                       publish_warmup: bool = True) -> Optional[Dict]:
         """
         Полный цикл создания и настройки канала.
 
@@ -268,6 +269,7 @@ class ChannelCreator:
             username_base: Базовый username
             topic: Тема для прогревочных постов
             avatar_bytes: Байты аватара (опционально)
+            publish_warmup: Публиковать ли авто-посты по теме после создания
 
         Returns:
             Словарь с данными канала или None при ошибке
@@ -289,8 +291,12 @@ class ChannelCreator:
             if username:
                 await self.add_channel_to_bio(username)
 
-            # 5. Публикуем прогревочные посты
-            posted = await self.publish_warmup_posts(channel, topic)
+            # 5. Публикуем прогревочные посты (только если явно включено)
+            if publish_warmup and topic:
+                posted = await self.publish_warmup_posts(channel, topic)
+            else:
+                posted = 0
+                self._log("Авто-посты при создании отключены — канал создан пустым")
 
             # 6. Получаем invite link
             invite_link = ""

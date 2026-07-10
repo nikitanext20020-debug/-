@@ -550,7 +550,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить профиль")
+            raise HTTPException(status_code=500, detail="Не удалось получить проф��ль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1346,7 +1346,7 @@ async def fix_private_channel_titles():
         # Небольшая задержка
         await asyncio.sleep(0.3)
     
-    print(f"[fix-titles] Готово! Исправлено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
+    print(f"[fix-titles] Готово! Исправ��ено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
     return {"status": "ok", "fixed": fixed, "skipped": skipped, "errors": errors, "total": len(private_channels)}
 
 @app.post("/discovery/channels/{channel}/comment-now")
@@ -1528,7 +1528,7 @@ async def comment_now(channel: str):
         # Формируем ссылку на комментарий
         if normalized.startswith('+'):
             # Приватный канал - ссылка через c/channel_id
-            # ID канала нужно преобразовать (убрать -100 префикс)
+            # ID канала ну��но преобразовать (убрать -100 префикс)
             channel_id = entity.id
             if channel_id < 0:
                 channel_id = int(str(channel_id).replace('-100', ''))
@@ -2136,8 +2136,9 @@ class ChannelCreateRequest(BaseModel):
     title: str
     about: str = ""
     username_base: str
-    topic: str
+    topic: str = ""
     avatar_base64: Optional[str] = None
+    publish_warmup: bool = False  # По умолчанию НЕ постить авто-посты при создании
 
 class ChannelPostRequest(BaseModel):
     text: str
@@ -2201,7 +2202,8 @@ async def create_channel(acc_id: int, data: ChannelCreateRequest):
                 about=data.about,
                 username_base=data.username_base,
                 topic=data.topic,
-                avatar_bytes=avatar_bytes
+                avatar_bytes=avatar_bytes,
+                publish_warmup=data.publish_warmup
             )
         
         future = worker.run_task(_create())

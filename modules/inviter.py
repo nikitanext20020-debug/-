@@ -164,7 +164,7 @@ class Inviter:
         stats = {'success': 0, 'errors': 0, 'skipped': 0, 'total': 0}
 
         try:
-            channel = await self.client.get_entity(channel_id)
+            channel = await self._resolve_entity(channel_id)
         except Exception as e:
             self._log(f"Не удалось получить канал {channel_id}: {e}", "error")
             return stats

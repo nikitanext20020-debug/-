@@ -41,7 +41,8 @@
   </div>
 
   <nav class="tabs">
-    <button class="tab active" data-tab="accounts">Аккаунты</button>
+    <button class="tab active" data-tab="dashboard">Главная</button>
+    <button class="tab" data-tab="accounts">Аккаунты</button>
     <button class="tab" data-tab="behavior">Поведение в чатах</button>
     <button class="tab" data-tab="channels">Каналы</button>
     <button class="tab" data-tab="ownchannels">Мои каналы</button>
@@ -70,8 +71,53 @@
 
 <main>
 
+  <!-- ============================== TAB: ГЛАВНАЯ ============================== -->
+  <section class="tab-pane active" id="tab-dashboard">
+    <div class="page-header">
+      <h2>Панель управления</h2>
+      <div class="page-actions">
+        <span class="muted small" id="dash-updated"></span>
+        <button class="btn btn-ghost" id="btn-refresh-dashboard">Обновить</button>
+      </div>
+    </div>
+
+    <!-- Статусы системы -->
+    <div class="metrics-row">
+      <div class="metric"><span class="metric-label">Всего аккаунтов</span><span class="metric-value" id="dash-accounts">—</span></div>
+      <div class="metric"><span class="metric-label">Запущено воркеров</span><span class="metric-value" id="dash-running">—</span></div>
+      <div class="metric"><span class="metric-label">Health Watcher</span><span class="metric-value" id="dash-watcher">—</span></div>
+      <div class="metric"><span class="metric-label">Глобальная пауза</span><span class="metric-value" id="dash-pause">—</span></div>
+      <div class="metric"><span class="metric-label">Комментариев за 24ч</span><span class="metric-value" id="dash-comments-24h">—</span></div>
+      <div class="metric"><span class="metric-label">Ошибок за сегодня</span><span class="metric-value" id="dash-errors-today">—</span></div>
+    </div>
+
+    <div class="dash-grid">
+      <!-- Аккаунты -->
+      <div class="dash-col">
+        <div class="section-head-row">
+          <h3 class="section-h3">Аккаунты</h3>
+          <button class="btn btn-ghost btn-sm" data-goto-tab="accounts">Управлять</button>
+        </div>
+        <div id="dash-accounts-list" class="dash-acc-list">
+          <div class="empty">Загрузка…</div>
+        </div>
+      </div>
+
+      <!-- Логи -->
+      <div class="dash-col">
+        <div class="section-head-row">
+          <h3 class="section-h3">Последние события</h3>
+          <button class="btn btn-ghost btn-sm" data-goto-tab="logs">Все логи</button>
+        </div>
+        <div id="dash-logs" class="dash-logs">
+          <div class="logs-empty">Загрузка…</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============================== TAB: АККАУНТЫ ============================== -->
-  <section class="tab-pane active" id="tab-accounts">
+  <section class="tab-pane" id="tab-accounts">
     <div class="page-header">
       <h2>Аккаунты</h2>
       <div class="page-actions">
@@ -95,7 +141,8 @@
     <div class="page-header">
       <h2>Поведение в чатах</h2>
       <div class="page-actions">
-        <span class="muted small" id="behavior-saved-hint"></span>
+        <span class="muted small" id="behavior-saved-hint">Переключатели сохраняются автоматически</span>
+        <button class="btn btn-primary" id="btn-save-behavior">Сохранить всё</button>
       </div>
     </div>
 
@@ -150,7 +197,7 @@
             <span class="toggle-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>
             </span>
-            Писать спамботу при флуде
+            Писать с��амботу при флуде
           </div>
           <div class="toggle-desc">
             При <code>PeerFloodError</code> бот идёт в <b>@SpamBot</b>, отправляет <code>/start</code>,
@@ -331,7 +378,14 @@
             <div class="form-row"><label>Основа для @username</label>
               <input type="text" name="username_base" placeholder="mychannel" required /></div>
             <div class="form-row"><label>Тема (для авто-постов)</label>
-              <input type="text" name="topic" placeholder="крипта, новости…" required /></div>
+              <input type="text" name="topic" placeholder="крипта, новости…" /></div>
+          </div>
+          <div class="form-row inline-toggle">
+            <label class="switch">
+              <input type="checkbox" name="publish_warmup" />
+              <span class="slider"></span>
+            </label>
+            <span class="muted small">Сразу опубликовать авто-посты по теме (иначе канал создаётся пустым)</span>
           </div>
           <div class="form-row"><label>Аватарка (необязательно)</label>
             <input type="file" name="avatar" accept="image/*" /></div>
@@ -423,7 +477,7 @@
         <form id="form-invite-start">
           <div class="form-row"><label>ID вашего канала/группы</label>
             <input type="number" name="channel_id" placeholder="-1001234567890" required /></div>
-          <div class="form-row"><label>Источник (@чат, необязательно — иначе берутся спарсенные)</label>
+          <div class="form-row"><label>Источник (@чат, необязательно — иначе берутся с��арсенные)</label>
             <input type="text" name="source_chat_id" placeholder="@somechat" /></div>
           <div class="form-row"><label>Дневной лимит</label>
             <input type="number" name="daily_limit" min="1" max="200" placeholder="50" /></div>

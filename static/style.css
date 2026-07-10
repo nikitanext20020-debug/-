@@ -443,6 +443,14 @@ input:checked + .slider::before {
 .switch input:focus-visible + .slider { box-shadow: 0 0 0 3px var(--accent-glow); }
 input:disabled + .slider { opacity: 0.5; cursor: not-allowed; }
 
+/* Inline toggle rows (checkbox + описание в одну строку) */
+.form-row.inline-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-direction: row;
+}
+
 /* ============== FORMS ============== */
 .settings-grid { display: grid; gap: 16px; }
 .form-grid-2 {
