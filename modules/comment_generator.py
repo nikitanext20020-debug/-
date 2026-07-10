@@ -32,6 +32,21 @@ class CommentGenerator:
         if self.db:
             return self.db.get_setting("gemini_model", Config.GEMINI_MODEL) or Config.GEMINI_MODEL
         return Config.GEMINI_MODEL
+
+    def _get_max_tokens(self) -> int:
+        """
+        Лимит токенов ответа. Для reasoning-моделей (gemini-3-flash-preview)
+        держим большой запас, иначе модель тратит бюджет на скрытые рассуждения
+        и возвращает пустой/обрезанный текст.
+        """
+        default = Config.COMMENT_MAX_TOKENS
+        if self.db:
+            try:
+                val = int(self.db.get_setting("comment_max_tokens", default) or default)
+                return max(val, 256)  # ниже 256 reasoning-модель почти всегда возвращает пустоту
+            except (TypeError, ValueError):
+                return default
+        return default
     
     def _get_headers(self) -> dict:
         """Получает заголовки с актуальным API ключом"""
@@ -118,7 +133,7 @@ class CommentGenerator:
             payload = {
                 "model": self._get_model(),
                 "messages": messages,
-                "max_tokens": Config.COMMENT_MAX_TOKENS,
+                "max_tokens": self._get_max_tokens(),
                 "temperature": Config.COMMENT_TEMPERATURE
             }
 
@@ -218,7 +233,7 @@ class CommentGenerator:
             payload = {
                 "model": self._get_model(),
                 "messages": messages,
-                "max_tokens": Config.COMMENT_MAX_TOKENS,
+                "max_tokens": self._get_max_tokens(),
                 "temperature": Config.COMMENT_TEMPERATURE
             }
 
