@@ -276,6 +276,59 @@ class BotWorker:
                 )
         return await self.client.send_message(entity=channel, message=message, comment_to=post_id)
 
+    async def _verify_comment_published(self, result, name: str) -> bool:
+        """
+        Проверяет, что отправленный комментарий действительно виден в чате.
+
+        send_message может вернуть объект сообщения без ошибки, но при этом
+        комментарий будет невидим для других (теневой бан) или уйти в
+        премодерацию группы обсуждений. В таких случаях в логах раньше было
+        «✅ Комментарий отправлен», а по факту нового коммента не появлялось.
+
+        Логика: через небольшую паузу перечитываем сообщение по его id. Если
+        Telegram его больше не отдаёт — коммент, скорее всего, снят/на модерации.
+
+        Returns:
+            True  — сообщение подтверждено (или проверку не удалось выполнить);
+            False — сообщение не найдено (вероятный теневой бан/премодерация).
+        """
+        if result is None:
+            return False
+
+        # Даём Telegram время применить модерацию/скрытие
+        delay = self._get_cached_setting("verify_comment_delay", 5)
+        try:
+            await asyncio.sleep(max(2, int(delay)))
+        except Exception:
+            await asyncio.sleep(5)
+
+        try:
+            chat_ref = getattr(result, "chat_id", None) or getattr(result, "peer_id", None)
+            msg_id = getattr(result, "id", None)
+            if chat_ref is None or msg_id is None:
+                return True  # не с чем сверяться — не поднимаем ложную тревогу
+
+            fetched = await self.client.get_messages(chat_ref, ids=msg_id)
+
+            if fetched is None or (isinstance(fetched, list) and not any(fetched)):
+                self.log(
+                    f"👻 Комментарий в {name} отправлен, но не виден при перепроверке — "
+                    f"вероятен теневой бан или премодерация комментариев. Помечаю канал.",
+                    "warning",
+                )
+                # Помечаем как забанен в этом канале, чтобы не тратить попытки впустую
+                try:
+                    self.db.mark_banned(self.account_id, name)
+                except Exception:
+                    pass
+                return False
+
+            return True
+        except Exception as e:
+            # Ошибка проверки не должна ломать основной поток
+            self.log(f"⚠️ Не удалось проверить публикацию коммента в {name}: {e}", "warning")
+            return True
+
     async def _simulate_typing(self, entity, seconds: float = 2.0):
         """
         Имитирует набор текста перед отправкой/редактированием.
@@ -303,7 +356,7 @@ class BotWorker:
         if len(self._joined_channels) > 500:
             # Преобразуем в список, берем последние 500, обратно в set
             self._joined_channels = set(list(self._joined_channels)[-500:])
-            self.log(f"🧹 Очистка кэша каналов: оставлено 500 из {len(self._joined_channels) + 500}")
+            self.log(f"🧹 Очистка кэша каналов: оставлено 500 ��з {len(self._joined_channels) + 500}")
         
         # Очистка кэша групп обсуждений
         if len(self._joined_discussion_groups) > 500:
@@ -545,6 +598,13 @@ class BotWorker:
                 if cycle % 3 == 0:  # Каждые 3 цикла
                     await self._gradual_join_from_database()
                 
+                # Автоматический инвайтинг (парсинг + приглашение батча)
+                auto_invite_interval = int(self._get_cached_setting("auto_invite_interval_cycles", 5) or 5)
+                if (cycle % max(1, auto_invite_interval) == 0
+                        and self._get_cached_setting("auto_invite_enabled", False)):
+                    self.log("📨 Авто-инвайт: цикл парсинга и приглашения...")
+                    await self._process_auto_invite()
+                
                 # Периодические задачи
                 if cycle % 10 == 0:
                     self.log("📡 Повторная проверка подписок...")
@@ -584,9 +644,56 @@ class BotWorker:
                 self.log(f"❌ Ошибка в цикле: {e}", "error")
                 await asyncio.sleep(30)
 
+    async def _process_auto_invite(self):
+        """
+        Автоматический инвайтинг в цикле воркера.
+
+        Раньше инвайт был ТОЛЬКО ручным (кнопки в панели). Теперь, если в
+        настройках включён тоггл auto_invite_enabled, воркер сам:
+          1. парсит участников из чатов-источников (с пагинацией),
+          2. приглашает небольшой батч в целевой канал каждый вызов,
+          3. соблюдает дневной лимит и делает паузы между инвайтами.
+        """
+        if not self.inviter:
+            return
+
+        target = (self._get_cached_setting("auto_invite_target_channel", "") or "").strip()
+        if not target:
+            self.log("⚠️ Авто-инвайт включён, но не задан целевой канал (auto_invite_target_channel)", "warning")
+            return
+
+        # Источники: строка через запятую/перенос строки или список
+        raw_sources = self._get_cached_setting("auto_invite_source_chats", "") or ""
+        if isinstance(raw_sources, list):
+            sources = [str(s).strip() for s in raw_sources if str(s).strip()]
+        else:
+            sources = [s.strip() for s in str(raw_sources).replace("\n", ",").split(",") if s.strip()]
+
+        per_cycle = int(self._get_cached_setting("auto_invite_per_cycle", 3) or 3)
+        daily_limit = int(self._get_cached_setting("auto_invite_daily_limit", Config.INVITER_DAILY_LIMIT)
+                          or Config.INVITER_DAILY_LIMIT)
+
+        try:
+            stats = await self.inviter.run_auto_invite_batch(
+                channel_id=target,
+                source_chats=sources,
+                per_cycle=per_cycle,
+                daily_limit=daily_limit,
+            )
+            if stats.get('reached_daily_limit'):
+                self.log(f"🛑 Авто-инвайт: дневной лимит достигнут ({daily_limit})")
+            elif stats.get('total'):
+                self.log(
+                    f"📨 Авто-инвайт в {target}: +{stats.get('success', 0)} приглашено, "
+                    f"{stats.get('skipped', 0)} пропущено, {stats.get('errors', 0)} ошибок "
+                    f"(спарсено новых: {stats.get('parsed', 0)})"
+                )
+        except Exception as e:
+            self.log(f"❌ Ошибка авто-инвайта: {e}", "error")
+
     def _update_active_channels(self):
         """Обновляет список активных каналов из БД, исключая забаненные для этого аккаунта"""
-        # Получаем каналы из базы данных (только с открытыми комментами)
+        # Получаем каналы из базы данных (только с открыты��и комментами)
         try:
             db_channels = self.db.get_found_channels(limit=500, only_open_comments=True)
             all_channels = [ch['channel'] for ch in db_channels]
@@ -847,7 +954,7 @@ class BotWorker:
                         continue
 
                     # Комментарии недоступны - помечаем аккаунт как забаненный
-                    self.log(f"⚠️ Комментарии в {name} недоступны для этого аккаунта ({e}).", "warning")
+                    self.log(f"⚠️ Комментарии в {name} недосту��ны для этого аккаунта ({e}).", "warning")
                     
                     # Помечаем как забанен для этого аккаунта
                     self.db.mark_banned(self.account_id, name)
@@ -962,7 +1069,7 @@ class BotWorker:
                     try:
                         edit_entity = discussion_chat if discussion_chat else channel
                         
-                        # Имитируем набор текста (0.05 сек на символ, 2-5 сек в среднем)
+                        # Имитиру��м набор текста (0.05 сек на символ, 2-5 сек в среднем)
                         typing_time = min(len(comment) * 0.05, 5.0)  # Максимум 5 секунд
                         await self._simulate_typing(edit_entity, seconds=typing_time)
                         
@@ -1008,6 +1115,10 @@ class BotWorker:
                 log_link = f"https://t.me/{clean_name}/{post.id}?comment={result.id}"
                 
                 self.log(f"✅ Комментарий отправлен в {name}: {log_link}")
+
+                # Проверяем, что коммент реально виден (ловим теневой бан/премодерацию)
+                if self._get_cached_setting("verify_comment_published", True):
+                    await self._verify_comment_published(result, name)
                 
                 # Разблокируем канал после успешного комментария
                 self.db.unlock_channel(name)

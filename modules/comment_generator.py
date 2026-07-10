@@ -10,6 +10,61 @@ from config import Config
 from utils.async_http import AsyncHTTPClient, get_http_client
 
 
+def _finalize_comment(content: str, max_words: int) -> str:
+    """
+    Аккуратно нормализует и (при необходимости) укорачивает комментарий.
+
+    Раньше текст резался жёстко: `" ".join(words[:max_words])` — из-за чего
+    коммент обрывался на полуслове/полупредложении ("Ого, какой крутой").
+    А `.replace("'", "")` вырезал апострофы, ломая слова ("don't" → "dont").
+
+    Теперь:
+    - убираем только ОБРАМЛЯЮЩИЕ кавычки (модель часто оборачивает ответ в них),
+      апострофы и внутренние кавычки сохраняем;
+    - если текст длиннее лимита — режем по границе предложения, а не по слову,
+      чтобы фраза выглядела законченной.
+    """
+    if not content:
+        return ""
+
+    text = content.strip()
+
+    # Снимаем обрамляющие кавычки (парные), не трогая внутренние апострофы
+    for q in ('"', '«', '“', '"', "'"):
+        if len(text) >= 2 and text.startswith(q):
+            closing = {'«': '»', '“': '”'}.get(q, q)
+            if text.endswith(closing):
+                text = text[1:-1].strip()
+                break
+
+    words = text.split()
+    # Небольшой буфер: не режем, если чуть длиннее лимита
+    if len(words) <= max_words + 5:
+        return text.strip()
+
+    # Слишком длинно — набираем предложения, пока укладываемся в лимит
+    import re
+    sentences = re.split(r'(?<=[.!?…])\s+', text)
+    result = ""
+    count = 0
+    for sent in sentences:
+        sent_words = len(sent.split())
+        if count and count + sent_words > max_words + 5:
+            break
+        result = (result + " " + sent).strip()
+        count += sent_words
+        if count >= max_words:
+            break
+
+    # Fallback: одно длинное предложение без знаков препинания (или первое
+    # предложение само по себе длиннее лимита) — режем по словам, не оставляя
+    # висящую открытую пунктуацию в конце.
+    if not result or len(result.split()) > max_words + 5:
+        result = " ".join(words[:max_words]).rstrip(",;:—- ")
+
+    return result.strip()
+
+
 class CommentGenerator:
     """Класс для генерации комментариев через Gemini (RouterAI / OpenAI API format)"""
     
@@ -142,12 +197,7 @@ class CommentGenerator:
             
             if response.success and isinstance(response.data, dict):
                 content = response.data.get('choices', [{}])[0].get('message', {}).get('content', '')
-                comment = content.strip().replace('"', '').replace("'", "")
-                
-                # Обрезка если слишком длинно
-                words = comment.split()
-                if len(words) > Config.COMMENT_MAX_WORDS + 5:
-                    comment = " ".join(words[:Config.COMMENT_MAX_WORDS])
+                comment = _finalize_comment(content, Config.COMMENT_MAX_WORDS)
                 
                 if not comment:
                     self.last_error = "модель вернула пустой ответ (возможно, сработал фильтр контента)"
@@ -161,7 +211,7 @@ class CommentGenerator:
 
         except Exception as e:
             self.last_error = str(e)
-            print(f"Ошибка генерации комментария: {e}")
+            print(f"Ошибка генерации коммент��рия: {e}")
             return ""  # Лучше не комментировать чем писать шаблон
     
     def generate_comment(
@@ -247,12 +297,7 @@ class CommentGenerator:
             if response.status_code == 200:
                 data = response.json()
                 content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-                comment = content.strip().replace('"', '').replace("'", "")
-                
-                # Обрезка если слишком длинно
-                words = comment.split()
-                if len(words) > Config.COMMENT_MAX_WORDS + 5:
-                    comment = " ".join(words[:Config.COMMENT_MAX_WORDS])
+                comment = _finalize_comment(content, Config.COMMENT_MAX_WORDS)
                 
                 if not comment:
                     self.last_error = "модель вернула пустой ответ (возможно, сработал фильтр контента)"

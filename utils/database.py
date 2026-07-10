@@ -185,6 +185,7 @@ class Database:
                     status TEXT DEFAULT 'new', -- new, verified, rejected, active
                     last_checked TIMESTAMP,
                     source TEXT, -- search, link, telemetr
+                    is_pinned INTEGER DEFAULT 0, -- «замочек»: защита от авточистки
                     found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -300,6 +301,16 @@ class Database:
             except sqlite3.OperationalError:
                 try:
                     cursor.execute("ALTER TABLE found_channels ADD COLUMN channel_id INTEGER")
+                except:
+                    pass
+
+            # Миграция: is_pinned - «замочек». Закреплённые каналы никогда не
+            # удаляются авточисткой и переживают смену аккаунта (таблица общая).
+            try:
+                cursor.execute("SELECT is_pinned FROM found_channels LIMIT 1")
+            except sqlite3.OperationalError:
+                try:
+                    cursor.execute("ALTER TABLE found_channels ADD COLUMN is_pinned INTEGER DEFAULT 0")
                 except:
                     pass
             
@@ -576,9 +587,9 @@ class Database:
                 if original_channel != normalized_channel:
                     cursor.execute("INSERT OR REPLACE INTO deleted_channels (channel) VALUES (?)", (original_channel,))
             else:
-                # Автоматическое удаление - не трогаем manual каналы
+                # Автоматическое удаление - не трогаем manual и закреплённые (замочек) каналы
                 cursor.execute(
-                    "DELETE FROM found_channels WHERE channel = ? AND source NOT IN ('manual', 'manual_join')", 
+                    "DELETE FROM found_channels WHERE channel = ? AND source NOT IN ('manual', 'manual_join') AND COALESCE(is_pinned, 0) = 0", 
                     (normalized_channel,)
                 )
                 deleted_count = cursor.rowcount
@@ -631,12 +642,49 @@ class Database:
             cursor.execute("DELETE FROM deleted_channels WHERE channel = ?", (normalized_channel,))
     
     def cleanup_closed_channels(self) -> int:
-        """Удаляет все каналы с закрытыми комментами из базы (кроме manual)"""
+        """Удаляет все каналы с закрытыми комментами из базы (кроме manual и закреплённых)"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM found_channels WHERE can_comment = 0 AND source NOT IN ('manual', 'manual_join')")
+            where = "can_comment = 0 AND source NOT IN ('manual', 'manual_join') AND COALESCE(is_pinned, 0) = 0"
+            cursor.execute(f"SELECT COUNT(*) FROM found_channels WHERE {where}")
             count = cursor.fetchone()[0]
-            cursor.execute("DELETE FROM found_channels WHERE can_comment = 0 AND source NOT IN ('manual', 'manual_join')")
+            cursor.execute(f"DELETE FROM found_channels WHERE {where}")
+            return count
+
+    def set_channel_pinned(self, channel: str, pinned: bool) -> bool:
+        """
+        Ставит/снимает «замочек» на канале. Закреплённые каналы не удаляются
+        авточисткой и остаются в общей базе для всех аккаунтов.
+        """
+        normalized_channel = channel.lstrip('@')
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE found_channels SET is_pinned = ? WHERE channel = ?",
+                (1 if pinned else 0, normalized_channel)
+            )
+            return cursor.rowcount > 0
+
+    def cleanup_unpinned_channels(self, older_than_days: int = None) -> int:
+        """
+        Удаляет НЕзакреплённые каналы.
+
+        - Всегда сохраняет каналы с замочком (is_pinned=1) и manual-каналы.
+        - Если задан older_than_days — удаляет только те, что старше N дней
+          (по found_at). Если None — удаляет все незакреплённые/не-manual.
+
+        Returns: количество удалённых записей.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            where = "source NOT IN ('manual', 'manual_join') AND COALESCE(is_pinned, 0) = 0"
+            params = []
+            if older_than_days is not None and older_than_days > 0:
+                where += " AND found_at < datetime('now', ?)"
+                params.append(f'-{int(older_than_days)} days')
+            cursor.execute(f"SELECT COUNT(*) FROM found_channels WHERE {where}", params)
+            count = cursor.fetchone()[0]
+            cursor.execute(f"DELETE FROM found_channels WHERE {where}", params)
             return count
 
     def update_channel_status(self, channel: str, status: str):
@@ -1405,7 +1453,7 @@ class Database:
             # Точное совпадение
             if normalized_new == normalized_existing:
                 return True
-            # Высокое сходство (>90% символов совпадают)
+            # Высокое сходство (>90% символов сов��адают)
             if len(normalized_new) > 10 and len(normalized_existing) > 10:
                 common = sum(1 for a, b in zip(normalized_new, normalized_existing) if a == b)
                 similarity = common / max(len(normalized_new), len(normalized_existing))
