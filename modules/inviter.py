@@ -91,46 +91,87 @@ class Inviter:
             "Для числовых ID аккаунт должен состоять в чате — используйте @username или ссылку t.me/…"
         )
 
-    async def parse_users_from_chat(self, chat_id_or_username, limit: int = 200) -> int:
+    async def parse_users_from_chat(self, chat_id_or_username, limit: int = 5000) -> int:
         """
-        Парсит пользователей из чата/группы.
+        Парсит пользователей из чата/группы С ПАГИНАЦИЕЙ.
+
+        Telegram за один GetParticipantsRequest отдаёт ограниченный батч
+        (обычно до 100-200 юзеров). Чтобы собрать всех доступных участников,
+        нужно листать список с растущим offset, пока батчи не закончатся.
 
         Args:
             chat_id_or_username: ID или username чата
-            limit: Максимальное количество пользователей для парсинга
+            limit: Максимальное количество пользователей для парсинга (потолок)
 
         Returns:
-            Количество спарсенных пользователей
+            Количество НОВЫХ (добавленных в БД) пользователей
         """
         try:
             entity = await self._resolve_entity(chat_id_or_username)
+            title = getattr(entity, 'title', str(chat_id_or_username))
 
-            result = await self.client(GetParticipantsRequest(
-                channel=entity,
-                filter=ChannelParticipantsSearch(''),
-                offset=0,
-                limit=limit,
-                hash=0
-            ))
+            BATCH = 200          # размер одного запроса к Telegram
+            offset = 0
+            seen = 0             # всего просмотрено участников (для detecтa конца)
+            new_count = 0        # новых записей в БД
+            valid_count = 0      # живых (не бот/не удалён) участников
+            empty_batches = 0    # подряд идущих пустых батчей
 
-            count = 0
-            for user in result.users:
-                if user.bot or user.deleted:
+            while seen < limit:
+                try:
+                    result = await self.client(GetParticipantsRequest(
+                        channel=entity,
+                        filter=ChannelParticipantsSearch(''),
+                        offset=offset,
+                        limit=min(BATCH, limit - seen),
+                        hash=0
+                    ))
+                except FloodWaitError as e:
+                    # FloodWait в середине пагинации: ждём и продолжаем с того же offset
+                    self._log(f"FloodWait {e.seconds}с во время парсинга, жду", "warning")
+                    if e.seconds > 600:
+                        self._log("FloodWait слишком большой, останавливаю парсинг", "warning")
+                        break
+                    await asyncio.sleep(e.seconds + 5)
                     continue
 
-                self.db.add_parsed_user(
-                    self.account_id,
-                    user.id,
-                    user.username,
-                    user.first_name,
-                    user.last_name,
-                    entity.id,
-                    getattr(entity, 'title', str(chat_id_or_username))
-                )
-                count += 1
+                users = result.users or []
+                if not users:
+                    # Пустой батч — участники закончились (или Telegram скрывает остальных)
+                    empty_batches += 1
+                    if empty_batches >= 2:
+                        break
+                    offset += BATCH
+                    continue
+                empty_batches = 0
 
-            self._log(f"Спарсено {count} пользователей из {getattr(entity, 'title', chat_id_or_username)}")
-            return count
+                for user in users:
+                    seen += 1
+                    if user.bot or user.deleted:
+                        continue
+                    valid_count += 1
+                    # add_parsed_user возвращает True только для новых записей
+                    if self.db.add_parsed_user(
+                        self.account_id,
+                        user.id,
+                        user.username,
+                        user.first_name,
+                        user.last_name,
+                        entity.id,
+                        title
+                    ):
+                        new_count += 1
+
+                offset += len(users)
+
+                # Небольшая пауза между страницами — снижает риск FloodWait
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+
+            self._log(
+                f"Спарсено {new_count} новых (просмотрено {seen}, живых {valid_count}) "
+                f"из {title}"
+            )
+            return new_count
 
         except ChannelPrivateError:
             self._log("Канал приватный, нет доступа", "error")
@@ -292,3 +333,87 @@ class Inviter:
         # 4. Приглашаем
         result = await self.invite_users_to_channel(channel_id, filtered_user_ids)
         return result
+
+    async def run_auto_invite_batch(
+        self,
+        channel_id,
+        source_chats: list,
+        per_cycle: int = 5,
+        daily_limit: int = None,
+    ) -> Dict:
+        """
+        Один «тик» автоматического инвайтинга для цикла воркера.
+
+        1. Проверяет дневной лимит (по invite_stats за сегодня).
+        2. Если спарсенных ещё не приглашённых юзеров мало — парсит из
+           источников (по очереди).
+        3. Приглашает небольшой батч (per_cycle) в целевой канал.
+
+        Возвращает статистику батча + флаг reached_daily_limit.
+        """
+        if daily_limit is None:
+            daily_limit = Config.INVITER_DAILY_LIMIT
+
+        stats = {'success': 0, 'errors': 0, 'skipped': 0, 'total': 0,
+                 'parsed': 0, 'reached_daily_limit': False}
+
+        # 1. Дневной лимит
+        try:
+            today_count = self.db.get_invite_stats(self.account_id).get('today_count', 0)
+        except Exception:
+            today_count = 0
+
+        remaining_today = daily_limit - today_count
+        if remaining_today <= 0:
+            stats['reached_daily_limit'] = True
+            self._log(f"Дневной лимит инвайтов достигнут ({today_count}/{daily_limit})", "info")
+            return stats
+
+        batch_size = min(per_cycle, remaining_today)
+
+        # 2. Уже приглашённые в этот канал (чтобы не дёргать повторно)
+        already_invited = set()
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT user_id FROM invite_stats WHERE account_id = ? AND channel_id = ?",
+                    (self.account_id, channel_id)
+                )
+                already_invited = {row[0] for row in cursor.fetchall()}
+        except Exception:
+            pass
+
+        def _fresh_user_ids():
+            users = self.db.get_parsed_users(self.account_id, limit=500)
+            return [u['user_id'] for u in users if u['user_id'] not in already_invited]
+
+        candidates = _fresh_user_ids()
+
+        # 3. Если кандидатов мало — подпарсиваем из источников
+        if len(candidates) < batch_size and source_chats:
+            for src in source_chats:
+                src = str(src).strip()
+                if not src:
+                    continue
+                try:
+                    parsed = await self.parse_users_from_chat(src, limit=1000)
+                    stats['parsed'] += parsed
+                except Exception as e:
+                    self._log(f"Авто-парсинг из {src} не удался: {e}", "warning")
+                candidates = _fresh_user_ids()
+                if len(candidates) >= batch_size:
+                    break
+
+        if not candidates:
+            self._log("Нет новых пользователей для авто-инвайта (источники пусты или все приглашены)", "info")
+            return stats
+
+        # 4. Приглашаем батч
+        batch = candidates[:batch_size]
+        result = await self.invite_users_to_channel(channel_id, batch, daily_limit=batch_size)
+        stats['success'] += result.get('success', 0)
+        stats['errors'] += result.get('errors', 0)
+        stats['skipped'] += result.get('skipped', 0)
+        stats['total'] += result.get('total', 0)
+        return stats
