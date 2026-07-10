@@ -550,7 +550,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить проф��ль")
+            raise HTTPException(status_code=500, detail="Не удалось получить проф����ль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1010,6 +1010,35 @@ async def cleanup_closed_channels():
     count = db.cleanup_closed_channels()
     return {"deleted": count}
 
+@app.post("/discovery/channels/{channel:path}/pin")
+async def pin_channel(channel: str):
+    """Ставит «замочек» — канал не удаляется авточисткой и остаётся в общей базе."""
+    import urllib.parse
+    channel = urllib.parse.unquote(channel).lstrip('@')
+    ok = db.set_channel_pinned(channel, True)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Канал не найден")
+    return {"status": "pinned", "channel": channel}
+
+@app.delete("/discovery/channels/{channel:path}/pin")
+async def unpin_channel(channel: str):
+    """Снимает «замочек» с канала."""
+    import urllib.parse
+    channel = urllib.parse.unquote(channel).lstrip('@')
+    ok = db.set_channel_pinned(channel, False)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Канал не найден")
+    return {"status": "unpinned", "channel": channel}
+
+@app.post("/discovery/cleanup-unpinned")
+async def cleanup_unpinned_channels(older_than_days: Optional[int] = None):
+    """
+    Удаляет незакреплённые каналы (без замочка и не manual).
+    older_than_days: если задано — удаляет только старше N дней.
+    """
+    count = db.cleanup_unpinned_channels(older_than_days=older_than_days)
+    return {"deleted": count}
+
 @app.post("/discovery/channels/{channel}/recheck")
 async def recheck_channel(channel: str):
     """Перепроверяет канал на наличие открытых комментариев"""
@@ -1346,7 +1375,7 @@ async def fix_private_channel_titles():
         # Небольшая задержка
         await asyncio.sleep(0.3)
     
-    print(f"[fix-titles] Готово! Исправ��ено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
+    print(f"[fix-titles] Готово! ��справ��ено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
     return {"status": "ok", "fixed": fixed, "skipped": skipped, "errors": errors, "total": len(private_channels)}
 
 @app.post("/discovery/channels/{channel}/comment-now")
@@ -1389,7 +1418,7 @@ async def comment_now(channel: str):
     ]
     
     async def send_comment_with_worker(acc_id, worker):
-        """Пытается отправить комментарий через конкретный воркер"""
+        """Пытаетс�� отправить комментарий через конкретный воркер"""
         from telethon.tl.functions.messages import GetDiscussionMessageRequest
         from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest
         from telethon.tl.functions.messages import ImportChatInviteRequest
