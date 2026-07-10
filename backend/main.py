@@ -550,7 +550,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить проф����ль")
+            raise HTTPException(status_code=500, detail="Не удалось получить профиль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -778,6 +778,15 @@ async def get_settings():
         # === Health watcher ===
         "channel_watcher_enabled": db.get_setting("channel_watcher_enabled", True),
         "channel_watcher_interval_minutes": db.get_setting("channel_watcher_interval_minutes", 30),
+        # === Авто-инвайт (фоновый) ===
+        "auto_invite_enabled": db.get_setting("auto_invite_enabled", False),
+        "auto_invite_target_channel": db.get_setting("auto_invite_target_channel", ""),
+        "auto_invite_source_chats": db.get_setting("auto_invite_source_chats", ""),
+        "auto_invite_per_cycle": db.get_setting("auto_invite_per_cycle", 3),
+        "auto_invite_daily_limit": db.get_setting("auto_invite_daily_limit", Config.INVITER_DAILY_LIMIT),
+        "auto_invite_interval_cycles": db.get_setting("auto_invite_interval_cycles", 5),
+        # === Проверка публикации комментариев (детект теневого бана) ===
+        "verify_comment_published": db.get_setting("verify_comment_published", True),
         # === Глобальная пауза ===
         "global_pause": global_pause,
     }
@@ -819,6 +828,15 @@ class SettingsUpdate(BaseModel):
     # === Health watcher ===
     channel_watcher_enabled: Optional[bool] = None
     channel_watcher_interval_minutes: Optional[int] = None
+    # === Авто-инвайт (фоновый) ===
+    auto_invite_enabled: Optional[bool] = None
+    auto_invite_target_channel: Optional[str] = None
+    auto_invite_source_chats: Optional[str] = None
+    auto_invite_per_cycle: Optional[int] = None
+    auto_invite_daily_limit: Optional[int] = None
+    auto_invite_interval_cycles: Optional[int] = None
+    # === Проверка публикации комментариев (детект теневого бана) ===
+    verify_comment_published: Optional[bool] = None
     # === Глобальная пауза (через единый сеттер) ===
     global_pause: Optional[bool] = None
 
@@ -969,47 +987,6 @@ async def get_all_pending_requests():
         "total_pending": len(pending)
     }
 
-@app.delete("/discovery/channels/{channel:path}")
-async def delete_discovered_channel(channel: str):
-    """Удаляет канал из базы найденных каналов (принудительно, включая manual)"""
-    import urllib.parse
-    
-    # Декодируем URL-encoded строку
-    channel = urllib.parse.unquote(channel)
-    original_channel = channel  # Сохраняем оригинал для поиска в базе
-    
-    # Нормализуем канал - извлекаем хэш из полной ссылки
-    normalized = channel
-    if 't.me/' in normalized:
-        # Извлекаем часть после t.me/
-        parts = normalized.split('t.me/')
-        if len(parts) > 1:
-            normalized = parts[-1]
-    
-    # Убираем joinchat/ если есть
-    if normalized.startswith('joinchat/'):
-        normalized = '+' + normalized[9:]
-    
-    normalized = normalized.lstrip('@')
-    
-    try:
-        # Пробуем удалить по оригинальному значению (как в базе)
-        deleted = db.delete_found_channel(original_channel, force=True)
-        
-        # Если не удалилось - пробуем по нормализованному
-        if not deleted:
-            db.delete_found_channel(normalized, force=True)
-        
-        return {"status": "deleted", "channel": channel}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/discovery/cleanup")
-async def cleanup_closed_channels():
-    """Удаляет все каналы с закрытыми комментами (кроме manual)"""
-    count = db.cleanup_closed_channels()
-    return {"deleted": count}
-
 @app.post("/discovery/channels/{channel:path}/pin")
 async def pin_channel(channel: str):
     """Ставит «замочек» — канал не удаляется авточисткой и остаётся в общей базе."""
@@ -1029,6 +1006,47 @@ async def unpin_channel(channel: str):
     if not ok:
         raise HTTPException(status_code=404, detail="Канал не найден")
     return {"status": "unpinned", "channel": channel}
+
+@app.delete("/discovery/channels/{channel:path}")
+async def delete_discovered_channel(channel: str):
+    """Удаляет канал из базы найденных каналов (принудительно, включая manual)"""
+    import urllib.parse
+
+    # Декодируем URL-encoded строку
+    channel = urllib.parse.unquote(channel)
+    original_channel = channel  # Сохраняем оригинал для поиска в базе
+
+    # Нормализуем канал - извлекаем хэш из полной ссылки
+    normalized = channel
+    if 't.me/' in normalized:
+        # Извлекаем часть после t.me/
+        parts = normalized.split('t.me/')
+        if len(parts) > 1:
+            normalized = parts[-1]
+
+    # Убираем joinchat/ если есть
+    if normalized.startswith('joinchat/'):
+        normalized = '+' + normalized[9:]
+
+    normalized = normalized.lstrip('@')
+
+    try:
+        # Пробуем удалить по оригинальному значению (как в базе)
+        deleted = db.delete_found_channel(original_channel, force=True)
+
+        # Если не удалилось - пробуем по нормализованному
+        if not deleted:
+            db.delete_found_channel(normalized, force=True)
+
+        return {"status": "deleted", "channel": channel}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/discovery/cleanup")
+async def cleanup_closed_channels():
+    """Удаляет все каналы с закрытыми комментами (кроме manual)"""
+    count = db.cleanup_closed_channels()
+    return {"deleted": count}
 
 @app.post("/discovery/cleanup-unpinned")
 async def cleanup_unpinned_channels(older_than_days: Optional[int] = None):
@@ -1375,7 +1393,7 @@ async def fix_private_channel_titles():
         # Небольшая задержка
         await asyncio.sleep(0.3)
     
-    print(f"[fix-titles] Готово! ��справ��ено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
+    print(f"[fix-titles] Готово! Исправлено: {fixed}, Пропущено (уже верно): {skipped}, Ошибок: {errors}")
     return {"status": "ok", "fixed": fixed, "skipped": skipped, "errors": errors, "total": len(private_channels)}
 
 @app.post("/discovery/channels/{channel}/comment-now")
@@ -1418,7 +1436,7 @@ async def comment_now(channel: str):
     ]
     
     async def send_comment_with_worker(acc_id, worker):
-        """Пытаетс�� отправить комментарий через конкретный воркер"""
+        """Пытается отправить комментарий через конкретный воркер"""
         from telethon.tl.functions.messages import GetDiscussionMessageRequest
         from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest
         from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -1557,7 +1575,7 @@ async def comment_now(channel: str):
         # Формируем ссылку на комментарий
         if normalized.startswith('+'):
             # Приватный канал - ссылка через c/channel_id
-            # ID канала ну��но преобразовать (убрать -100 префикс)
+            # ID канала нужно преобразовать (убрать -100 префикс)
             channel_id = entity.id
             if channel_id < 0:
                 channel_id = int(str(channel_id).replace('-100', ''))
@@ -1881,7 +1899,7 @@ async def reset_closed_channels():
 async def reset_account_bans(account_id: int):
     """
     Удаляет записи о банах для конкретного аккаунта.
-    Полезно для новых аккаунтов, чтобы они не пропускали каналы, 
+    Полезно для новых аккаунтов, чтобы они не пропускали каналы,
     в которых был забанен старый аккаунт.
     """
     try:

@@ -356,7 +356,7 @@ class BotWorker:
         if len(self._joined_channels) > 500:
             # Преобразуем в список, берем последние 500, обратно в set
             self._joined_channels = set(list(self._joined_channels)[-500:])
-            self.log(f"🧹 Очистка кэша каналов: оставлено 500 ��з {len(self._joined_channels) + 500}")
+            self.log(f"🧹 Очистка кэша каналов: оставлено 500 из {len(self._joined_channels) + 500}")
         
         # Очистка кэша групп обсуждений
         if len(self._joined_discussion_groups) > 500:
@@ -693,7 +693,7 @@ class BotWorker:
 
     def _update_active_channels(self):
         """Обновляет список активных каналов из БД, исключая забаненные для этого аккаунта"""
-        # Получаем каналы из базы данных (только с открыты��и комментами)
+        # Получаем каналы из базы данных (только с открытыми комментами)
         try:
             db_channels = self.db.get_found_channels(limit=500, only_open_comments=True)
             all_channels = [ch['channel'] for ch in db_channels]
@@ -954,7 +954,7 @@ class BotWorker:
                         continue
 
                     # Комментарии недоступны - помечаем аккаунт как забаненный
-                    self.log(f"⚠️ Комментарии в {name} недосту��ны для этого аккаунта ({e}).", "warning")
+                    self.log(f"⚠️ Комментарии в {name} недоступны для этого аккаунта ({e}).", "warning")
                     
                     # Помечаем как забанен для этого аккаунта
                     self.db.mark_banned(self.account_id, name)
@@ -1069,7 +1069,7 @@ class BotWorker:
                     try:
                         edit_entity = discussion_chat if discussion_chat else channel
                         
-                        # Имитиру��м набор текста (0.05 сек на символ, 2-5 сек в среднем)
+                        # Имитируем набор текста (0.05 сек на символ, 2-5 сек в среднем)
                         typing_time = min(len(comment) * 0.05, 5.0)  # Максимум 5 секунд
                         await self._simulate_typing(edit_entity, seconds=typing_time)
                         

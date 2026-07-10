@@ -1453,7 +1453,7 @@ class Database:
             # Точное совпадение
             if normalized_new == normalized_existing:
                 return True
-            # Высокое сходство (>90% символов сов��адают)
+            # Высокое сходство (>90% символов совпадают)
             if len(normalized_new) > 10 and len(normalized_existing) > 10:
                 common = sum(1 for a, b in zip(normalized_new, normalized_existing) if a == b)
                 similarity = common / max(len(normalized_new), len(normalized_existing))
