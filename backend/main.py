@@ -550,7 +550,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить профиль")
+            raise HTTPException(status_code=500, detail="Не удалось получить проф��ль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -745,6 +745,7 @@ async def get_settings():
         "gemini_api_key": db.get_setting("gemini_api_key", Config.GEMINI_API_KEY),
         "gemini_model": db.get_setting("gemini_model", Config.GEMINI_MODEL),
         "search_enabled": db.get_setting("search_enabled", Config.SEARCH_ENABLED),
+        "search_keywords": db.get_setting("search_keywords", "\n".join(Config.load_keywords())),
         "min_channel_subs": db.get_setting("min_channel_subs", 20000),
         "min_chat_members": db.get_setting("min_chat_members", 100),
         "react_to_posts": db.get_setting("react_to_posts", True),
@@ -795,6 +796,7 @@ class SettingsUpdate(BaseModel):
     gemini_api_key: Optional[str] = None
     gemini_model: Optional[str] = None
     search_enabled: Optional[bool] = None
+    search_keywords: Optional[str] = None
     min_channel_subs: Optional[int] = None
     min_chat_members: Optional[int] = None
     react_to_posts: Optional[bool] = None
@@ -2635,7 +2637,7 @@ async def import_and_filter_channels(file: UploadFile = File(...), criteria: str
 
     acc_id, worker = running_workers[0]
 
-    # Читаем файл
+    # Читае�� файл
     content = await file.read()
     text_content = content.decode('utf-8', errors='ignore')
 

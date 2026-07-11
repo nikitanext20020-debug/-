@@ -613,9 +613,23 @@ class BotWorker:
                     # Вступаем в новые каналы (могли добавиться из рекламы)
                     await self._join_pending_channels()
                 
-                search_interval = self._get_cached_setting("search_interval_cycles", 20)
+                search_interval = max(1, int(self._get_cached_setting("search_interval_cycles", 20)))
                 if cycle % search_interval == 0 and self._get_cached_setting("search_enabled", Config.SEARCH_ENABLED):
-                    self.log("🎌 Поиск новых каналов...")
+                    raw_keywords = self.db.get_setting("search_keywords", "")
+                    if isinstance(raw_keywords, str) and raw_keywords.strip():
+                        # Поддерживаем ввод по строкам и через запятую, удаляем дубли.
+                        parsed_keywords = []
+                        seen_keywords = set()
+                        for item in raw_keywords.replace(',', '\n').splitlines():
+                            keyword = item.strip()
+                            key = keyword.casefold()
+                            if keyword and key not in seen_keywords:
+                                seen_keywords.add(key)
+                                parsed_keywords.append(keyword)
+                        self.keyword_search.keywords = parsed_keywords or Config.load_keywords()
+                    else:
+                        self.keyword_search.keywords = Config.load_keywords()
+                    self.log(f"🎌 Поиск новых каналов по {len(self.keyword_search.keywords)} тегам...")
                     await self.keyword_search.search_all(auto_add_to_active=True)
                 
                 # Очистка кэшей памяти каждые 50 циклов (предотвращение утечек)
@@ -1089,7 +1103,7 @@ class BotWorker:
                     delay_min = self._get_cached_setting("comment_delay_min", Config.COMMENT_DELAY_MIN)
                     delay_max = self._get_cached_setting("comment_delay_max", Config.COMMENT_DELAY_MAX)
                     
-                    # Режим прогрева - увеличиваем задержки в 2.5 раза (только для обычного режима)
+                    # Режим прогрева - увеличиваем задержки в 2.5 раза (только для обычного р��жима)
                     if self._get_cached_setting("warmup_mode", False):
                         delay_mult *= 2.5
                         self.log(f"🔥 Warmup Mode активен - задержки увеличены в 2.5 раза")
@@ -1116,7 +1130,7 @@ class BotWorker:
                 
                 self.log(f"✅ Комментарий отправлен в {name}: {log_link}")
 
-                # Проверяем, что коммент реально виден (ловим теневой бан/премодерацию)
+                # Проверяем, что коммент реально виден (ловим теневой бан/премодерац��ю)
                 if self._get_cached_setting("verify_comment_published", True):
                     await self._verify_comment_published(result, name)
                 
@@ -1323,7 +1337,7 @@ class BotWorker:
                                 self.log(f"⚠️ Не удалось вступить в группу обсуждений {name}. Помечаю.", "warning")
                                 self.db.mark_banned(self.account_id, name)
                     except Exception as join_err:
-                        # Помечаем канал как забаненный чтобы не пытаться снова
+                        # Помечаем канал как забане��ный чтобы не пытаться снова
                         self.log(f"⚠️ Не удалось вступить в группу обсуждений {name}: {join_err}. Помечаю.", "warning")
                         self.db.mark_banned(self.account_id, name)
                     self.db.unlock_channel(name)  # Разблокируем канал
@@ -1594,7 +1608,7 @@ class BotWorker:
                                 )
                                 self.db.update_channel_info(channel, channel_id=channel_id, title=real_title)
                             except Exception as e:
-                                self.log(f"⚠️ Не удалось получить название канала {channel}: {e}", "warning")
+                                self.log(f"⚠️ Не удалось получить название ��анала {channel}: {e}", "warning")
                                 # Сохраняем с хэшем как названием
                                 self.db.add_found_channel(
                                     channel=channel,
@@ -2602,7 +2616,7 @@ class BotWorker:
                         f"🗑️ Вышел из мусорного чата '{title}' "
                         f"(reason: {verdict.reason}, conf: {verdict.confidence:.2f})"
                     )
-                    # Анти-флуд: пауза между LeaveChannelRequest
+                    # Анти-флуд: па��за между LeaveChannelRequest
                     await asyncio.sleep(random.uniform(8.0, 15.0))
                 except FloodWaitError as fw:
                     self.log(f"⏳ FloodWait при отписке: {fw.seconds}с — стопим скан", "warning")

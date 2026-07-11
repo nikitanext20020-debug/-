@@ -279,7 +279,7 @@
 
     <form id="form-add-channel" class="channel-add-bar">
       <input type="text" id="add-channel-input" placeholder="@username, ссылка t.me/… или +инвайт" />
-      <input type="text" id="add-channel-title" placeholder="Название (необязательно)" />
+      <input type="text" id="add-channel-title" placeholder="Название (необяза��ельно)" />
       <button class="btn btn-primary" type="submit">+ Добавить канал</button>
     </form>
 
@@ -553,7 +553,7 @@
       <div class="panel">
         <h3 class="section-h3">Рассылка в ЛС</h3>
         <form id="form-ms-dm">
-          <div class="form-row"><label>ID пользователей (через запятую или с новой строки)</label>
+          <div class="form-row"><label>ID пользователей (че��ез запятую или с новой строки)</label>
             <textarea name="user_ids" rows="3" placeholder="123456789, 987654321"></textarea></div>
           <div class="form-row"><label>Текст сообщения</label>
             <textarea name="message_template" rows="3" placeholder="Привет! …" required></textarea></div>
@@ -731,11 +731,23 @@
       </div>
     </div>
 
-    <div class="settings-grid">
-      <div class="form-row">
-        <label>AI API ключ (RouterAI / Gemini)</label>
-        <input type="password" data-setting="gemini_api_key" placeholder="sk-…" />
-      </div>
+        <div class="settings-grid">
+          <div class="setting-field">
+            <label>Поиск каждые N циклов</label>
+            <input type="number" data-setting="search_interval_cycles" min="1" max="100" />
+            <span class="field-hint">Чаще = больше каналов, но выше нагрузка</span>
+          </div>
+          <div class="setting-field">
+            <label>Мин. подписчиков канала</label>
+            <input type="number" data-setting="min_channel_subs" min="100" max="10000000" step="100" />
+            <span class="field-hint">Каналы меньше этого порога игнорируются</span>
+          </div>
+        </div>
+        <div class="setting-field" style="margin-top:16px">
+          <label for="search-keywords">Теги и фразы для поиска каналов</label>
+          <textarea id="search-keywords" data-setting="search_keywords" rows="8" placeholder="нейросети&#10;искусственный интеллект&#10;ChatGPT&#10;AI tools"></textarea>
+          <span class="field-hint">Указывайте по одному тегу или фразе на строку. Можно вводить через запятую. Изменения применятся в следующем цикле поиска без перезапуска аккаунта.</span>
+        </div>
       <div class="form-row">
         <label>AI модель</label>
         <input type="text" data-setting="gemini_model" placeholder="google/gemini-3-flash-preview" />
