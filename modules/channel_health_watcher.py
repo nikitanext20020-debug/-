@@ -87,6 +87,38 @@ class ChannelHealthWatcher:
         except Exception:
             return default
 
+    def _is_globally_excluded(self, channel: str) -> bool:
+        try:
+            if self.db and hasattr(self.db, "is_channel_globally_excluded"):
+                return bool(self.db.is_channel_globally_excluded(channel))
+        except Exception:
+            return False
+        return False
+
+    def _structurally_exclude(self, channel: str, reason: str = "no_linked_chat", evidence=None):
+        try:
+            if hasattr(self.db, "exclude_channel_globally"):
+                self.db.exclude_channel_globally(
+                    channel,
+                    reason,
+                    evidence=evidence,
+                    source_module="channel_health_watcher",
+                )
+            if hasattr(self.db, "update_channel_comments_status"):
+                try:
+                    self.db.update_channel_comments_status(
+                        channel,
+                        has_open_comments=False,
+                        structural=True,
+                        reason=reason,
+                        evidence=evidence,
+                        source_module="channel_health_watcher",
+                    )
+                except TypeError:
+                    self.db.update_channel_comments_status(channel, has_open_comments=False)
+        except Exception as e:
+            self._log(f"structural exclude {channel}: {e}", "warning")
+
     def _pick_worker(self):
         """Возвращает первого живого воркера (или None)."""
         for w in self.workers.values():
@@ -180,6 +212,9 @@ class ChannelHealthWatcher:
             # способа валидировать без вступления (это делает channel_joiner)
             if name.startswith("+"):
                 continue
+            # Skip global exclusions — never revive them
+            if self._is_globally_excluded(name):
+                continue
 
             try:
                 result = self._run_in_worker(
@@ -232,9 +267,12 @@ class ChannelHealthWatcher:
             self.db.delete_found_channel(name, force=False)
             return {"action": "deleted", "reason": "не существует"}
         except ChannelPrivateError:
-            # Канал стал приватным — оставляем, но помечаем
-            self.db.update_channel_status(name, "private")
-            return {"action": "no_change", "reason": "стал приватным"}
+            # Private/access errors remain NON-global (account/local only)
+            try:
+                self.db.update_channel_status(name, "private")
+            except Exception:
+                pass
+            return {"action": "no_change", "reason": "private_local"}
         except FloodWaitError as fw:
             # пробрасываем наверх, чтобы остановить проход
             raise
@@ -277,13 +315,37 @@ class ChannelHealthWatcher:
         except Exception:
             pass
 
-        # Обновляем статус комментариев
-        if new_can_comment != was_can_comment:
-            self.db.update_channel_comments_status(name, has_open_comments=new_can_comment)
-            return {
-                "action": "revived" if new_can_comment else "closed_comments",
-                "subs": subs_count,
-            }
+        # Structural comments status via linked_chat_id proof only.
+        # Never revive a globally excluded channel (already skipped in _tick too).
+        if self._is_globally_excluded(name):
+            return {"action": "no_change", "reason": "globally_excluded"}
+
+        if not linked_chat_id:
+            # Proven no linked chat — structural global exclusion
+            self._structurally_exclude(
+                name,
+                reason="no_linked_chat",
+                evidence={"linked_chat_id": None, "subs": subs_count},
+            )
+            if was_can_comment:
+                return {"action": "closed_comments", "subs": subs_count}
+            return {"action": "updated", "subs": subs_count}
+
+        # linked_chat present. Update can_comment if needed, but never "revive"
+        # a prior global exclusion (those are skipped). Avoid revive action name
+        # for closed->open transitions of ordinary rows — report updated.
+        if not was_can_comment:
+            try:
+                self.db.update_channel_comments_status(
+                    name,
+                    has_open_comments=True,
+                    structural=False,
+                    reason="linked_chat_present",
+                    source_module="channel_health_watcher",
+                )
+            except TypeError:
+                self.db.update_channel_comments_status(name, has_open_comments=True)
+            return {"action": "updated", "subs": subs_count}
 
         return {"action": "updated", "subs": subs_count}
 

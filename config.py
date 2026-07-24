@@ -187,6 +187,10 @@ class Config:
     MASS_SEND_DELAY_MAX = 180
     MASS_SEND_ERROR_THRESHOLD = 5
 
+    # PeerFlood cooldown (12 hours). Hard-stop mass send / invite on PeerFlood
+    # and persist via Database.record_flood_wait — never raise limits to bypass.
+    PEER_FLOOD_COOLDOWN_SECONDS = 43200
+
     # Channel creator settings
     CHANNEL_WARMUP_POSTS_COUNT = 5
 

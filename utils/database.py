@@ -57,7 +57,7 @@ class Database:
         return cls._instance
     
     def __init__(self, db_path: str = 'data/bot.db'):
-        # Инициализируем только один раз
+        # Инициализируем только один раз (на процесс). Для тестов — reset_instance().
         if Database._initialized:
             return
         Database._initialized = True
@@ -65,6 +65,12 @@ class Database:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else '.', exist_ok=True)
         self._init_database()
+
+    @classmethod
+    def reset_instance(cls):
+        """Сбрасывает singleton (только для тестов / re-bind на другой путь)."""
+        cls._instance = None
+        cls._initialized = False
     
     @contextmanager
     def get_connection(self):
@@ -453,6 +459,186 @@ class Database:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_invite_stats_account ON invite_stats(account_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_mass_send_results_campaign ON mass_send_results(campaign_id)')
 
+            # Глобальные исключения каналов (НЕ account-local privacy/ban).
+            # Privacy/ban остаются в channel_bans; сюда — только явный global exclude.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS channel_global_exclusions (
+                    channel TEXT PRIMARY KEY,
+                    channel_id INTEGER,
+                    reason TEXT NOT NULL,
+                    evidence TEXT,
+                    source_module TEXT,
+                    excluded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            # Совместимая миграция для баз, где таблица уже была создана ранней версией.
+            cursor.execute("PRAGMA table_info(channel_global_exclusions)")
+            exclusion_cols = {col[1] for col in cursor.fetchall()}
+            for col_name, col_type in (
+                ('channel_id', 'INTEGER'),
+                ('evidence', 'TEXT'),
+                ('source_module', 'TEXT'),
+                ('updated_at', 'TIMESTAMP'),
+            ):
+                if col_name not in exclusion_cols:
+                    try:
+                        cursor.execute(
+                            f"ALTER TABLE channel_global_exclusions ADD COLUMN {col_name} {col_type}"
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_global_exclusions_reason "
+                "ON channel_global_exclusions(reason)"
+            )
+
+            # Junction: пользователь мог быть спарсен из нескольких source-чатов.
+            # parsed_users.source_chat_id сохраняем для совместимости (первый/последний),
+            # а фильтрация по источнику идёт через junction.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS parsed_user_sources (
+                    account_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    source_chat_id INTEGER NOT NULL,
+                    source_chat_title TEXT,
+                    parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (account_id, user_id, source_chat_id)
+                )
+            ''')
+            cursor.execute(
+                'CREATE INDEX IF NOT EXISTS idx_parsed_user_sources_src '
+                'ON parsed_user_sources(account_id, source_chat_id)'
+            )
+
+            # Миграция lifecycle-колонок кампаний mass_send
+            cursor.execute("PRAGMA table_info(mass_send_campaigns)")
+            campaign_cols = {col[1] for col in cursor.fetchall()}
+            for col_name, col_type in (
+                ('total_targets', 'INTEGER DEFAULT 0'),
+                ('processed_count', 'INTEGER DEFAULT 0'),
+                ('error_message', 'TEXT'),
+                ('finished_at', 'TIMESTAMP'),
+            ):
+                if col_name not in campaign_cols:
+                    try:
+                        cursor.execute(
+                            f"ALTER TABLE mass_send_campaigns ADD COLUMN {col_name} {col_type}"
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+
+            # Backfill junction from legacy source_chat_id on parsed_users
+            try:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO parsed_user_sources
+                        (account_id, user_id, source_chat_id, source_chat_title, parsed_at)
+                    SELECT account_id, user_id, source_chat_id, source_chat_title, parsed_at
+                    FROM parsed_users
+                    WHERE source_chat_id IS NOT NULL
+                ''')
+            except sqlite3.OperationalError:
+                pass
+
+    # --- Global channel exclusions (structural / operator-driven only) ---
+    def exclude_channel_globally(
+        self,
+        channel: str,
+        reason: str = "structural_no_comments",
+        channel_id: int = None,
+        evidence=None,
+        source_module: str = None,
+    ) -> bool:
+        """
+        Добавляет канал в общий постоянный exclude-list.
+        Вызывать только для структурных причин, подтверждённых данными Telegram
+        (например, успешный GetFullChannelRequest без linked_chat_id), а не для
+        ошибок доступа отдельного аккаунта.
+        """
+        normalized = (channel or "").lstrip("@").strip().casefold()
+        if not normalized:
+            return False
+        if evidence is None:
+            evidence_json = None
+        elif isinstance(evidence, str):
+            evidence_json = evidence
+        else:
+            evidence_json = json.dumps(evidence, ensure_ascii=False, default=str)
+        now = datetime.now()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO channel_global_exclusions
+                    (channel, channel_id, reason, evidence, source_module, excluded_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(channel) DO UPDATE SET
+                    channel_id = COALESCE(excluded.channel_id, channel_global_exclusions.channel_id),
+                    reason = excluded.reason,
+                    evidence = COALESCE(excluded.evidence, channel_global_exclusions.evidence),
+                    source_module = COALESCE(excluded.source_module, channel_global_exclusions.source_module),
+                    updated_at = excluded.updated_at
+                ''',
+                (
+                    normalized,
+                    channel_id,
+                    reason or "structural_no_comments",
+                    evidence_json,
+                    source_module,
+                    now,
+                    now,
+                ),
+            )
+            cursor.execute(
+                "UPDATE found_channels SET can_comment = 0, status = 'rejected' "
+                "WHERE LOWER(channel) = ?",
+                (normalized,),
+            )
+            return True
+
+    def is_channel_globally_excluded(self, channel: str) -> bool:
+        normalized = (channel or "").lstrip("@").strip().casefold()
+        if not normalized:
+            return False
+        variants = {
+            normalized,
+            normalized.lstrip("+"),
+            "+" + normalized.lstrip("+"),
+        }
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in variants)
+            cursor.execute(
+                f"SELECT 1 FROM channel_global_exclusions "
+                f"WHERE LOWER(channel) IN ({placeholders}) LIMIT 1",
+                tuple(variants),
+            )
+            return cursor.fetchone() is not None
+
+    def list_global_exclusions(self, limit: int = 500) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT channel, channel_id, reason, evidence, source_module,
+                       excluded_at, updated_at
+                FROM channel_global_exclusions
+                ORDER BY COALESCE(updated_at, excluded_at) DESC
+                LIMIT ?
+                ''',
+                (max(1, min(int(limit), 5000)),),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                if item.get("evidence"):
+                    try:
+                        item["evidence"] = json.loads(item["evidence"])
+                    except (TypeError, ValueError):
+                        pass
+                rows.append(item)
+            return rows
+
     # --- Найденные каналы ---
     def add_found_channel(self, channel: str, title: str, keyword: str = "", source: str = "search", 
                           subs: int = 0, views: int = 0, can_comment: bool = False, min_subs: int = 500) -> bool:
@@ -465,7 +651,11 @@ class Database:
         Returns:
             True если канал добавлен (новый), False если уже существовал или отфильтрован
         """
-        normalized_channel = channel.lstrip('@')
+        normalized_channel = (channel or '').lstrip('@').strip().casefold()
+
+        # Global exclusion gate — never re-add excluded channels
+        if self.is_channel_globally_excluded(normalized_channel):
+            return False
         
         # Фильтруем маленькие каналы (если известно количество подписчиков)
         if subs > 0 and subs < min_subs:
@@ -505,6 +695,11 @@ class Database:
             # По умолчанию показываем только каналы с открытыми комментами
             if only_open_comments:
                 conditions.append("can_comment = 1")
+
+            # Скрываем глобально исключённые
+            conditions.append(
+                "LOWER(channel) NOT IN (SELECT LOWER(channel) FROM channel_global_exclusions)"
+            )
             
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
@@ -693,15 +888,37 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("UPDATE found_channels SET status = ? WHERE channel = ?", (status, normalized_channel))
 
-    def update_channel_comments_status(self, channel: str, has_open_comments: bool):
-        """Обновляет статус комментариев канала (открыты/закрыты)"""
-        normalized_channel = channel.lstrip('@')
+    def update_channel_comments_status(
+        self,
+        channel: str,
+        has_open_comments: bool,
+        structural: bool = False,
+        reason: str = None,
+        evidence=None,
+        source_module: str = None,
+    ):
+        """
+        Обновляет статус комментариев. structural=True допустим только при
+        подтверждённом свойстве самого канала; account-local ошибки остаются
+        исключительно в channel_bans.
+        """
+        normalized_channel = (channel or '').lstrip('@').strip().casefold()
+        if structural and not has_open_comments:
+            return self.exclude_channel_globally(
+                normalized_channel,
+                reason=reason or "structural_no_comments",
+                evidence=evidence,
+                source_module=source_module,
+            )
+
+        # Обычное обновление не создаёт permanent exclusion.
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE found_channels SET can_comment = ? WHERE channel = ?", 
-                (1 if has_open_comments else 0, normalized_channel)
+                "UPDATE found_channels SET can_comment = ? WHERE LOWER(channel) = ?",
+                (1 if has_open_comments else 0, normalized_channel),
             )
+        return True
 
     def sanitize_channels(self):
         """Очищает базу от двойных @@ в названиях каналов"""
@@ -1194,26 +1411,39 @@ class Database:
     
     def should_pause_account(self, account_id: int) -> bool:
         """Проверяет, нужно ли приостановить аккаунт"""
+        return self.get_account_pause_seconds(account_id) > 0
+
+    def get_account_pause_seconds(self, account_id: int) -> int:
+        """
+        Сколько секунд ещё действует pause/rate-limit для аккаунта.
+        0 = можно работать. Учитывает health_status и rate_limited_until.
+        """
         health = self.get_account_health(account_id)
-        
-        # Проверяем статус
-        if health['health_status'] in ('paused', 'rate_limited'):
-            return True
-        
-        # Проверяем rate limit
-        if health['rate_limited_until']:
-            msk_tz = timezone(timedelta(hours=3))
-            now = datetime.now(msk_tz)
+        msk_tz = timezone(timedelta(hours=3))
+        now = datetime.now(msk_tz)
+
+        remaining = 0
+
+        if health.get('rate_limited_until'):
             try:
-                rate_limited = datetime.strptime(health['rate_limited_until'], '%Y-%m-%d %H:%M:%S')
-                rate_limited = rate_limited.replace(tzinfo=msk_tz)
+                rate_limited = datetime.strptime(
+                    health['rate_limited_until'], '%Y-%m-%d %H:%M:%S'
+                ).replace(tzinfo=msk_tz)
                 if now < rate_limited:
-                    return True
-            except:
+                    remaining = max(remaining, int((rate_limited - now).total_seconds()))
+            except Exception:
                 pass
-        
-        return False
-    
+
+        # paused without an explicit until → treat as still paused
+        if health.get('health_status') in ('paused', 'rate_limited') and remaining <= 0:
+            # If status says paused but no until timestamp, report a positive sentinel
+            if health.get('health_status') == 'paused' and not health.get('rate_limited_until'):
+                return 86400
+            if health.get('health_status') == 'rate_limited' and not health.get('rate_limited_until'):
+                return 3600
+
+        return max(0, remaining)
+
     def reset_account_health(self, account_id: int):
         """Сбрасывает статус здоровья аккаунта"""
         with self.get_connection() as conn:
@@ -2207,27 +2437,69 @@ class Database:
     def add_parsed_user(self, account_id: int, user_id: int, username: str = None,
                         first_name: str = None, last_name: str = None,
                         source_chat_id: int = None, source_chat_title: str = None) -> bool:
-        """Добавляет спарсенного пользователя. Возвращает True если добавлен (новый)."""
+        """
+        Добавляет спарсенного пользователя.
+        Возвращает True если пользователь новый для аккаунта.
+        Всегда регистрирует source_chat_id в parsed_user_sources (junction),
+        даже если user уже был спарсен из другого чата.
+        """
+        is_new = False
         with self.get_connection() as conn:
             cursor = conn.cursor()
             try:
-                cursor.execute('''
-                    INSERT INTO parsed_users (account_id, user_id, username, first_name, last_name, source_chat_id, source_chat_title)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (account_id, user_id, username, first_name, last_name, source_chat_id, source_chat_title))
-                return True
+                cursor.execute(
+                    "INSERT INTO parsed_users (account_id, user_id, username, first_name, last_name, source_chat_id, source_chat_title) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account_id, user_id, username, first_name, last_name, source_chat_id, source_chat_title),
+                )
+                is_new = True
             except sqlite3.IntegrityError:
-                return False
+                is_new = False
+                cursor.execute(
+                    "UPDATE parsed_users SET username = COALESCE(?, username), "
+                    "first_name = COALESCE(?, first_name), last_name = COALESCE(?, last_name), "
+                    "source_chat_id = COALESCE(?, source_chat_id), "
+                    "source_chat_title = COALESCE(?, source_chat_title) "
+                    "WHERE account_id = ? AND user_id = ?",
+                    (username, first_name, last_name, source_chat_id, source_chat_title, account_id, user_id),
+                )
 
-    def get_parsed_users(self, account_id: int, limit: int = 100, offset: int = 0) -> List[Dict]:
-        """Возвращает список спарсенных пользователей для аккаунта"""
+            if source_chat_id is not None:
+                try:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO parsed_user_sources "
+                        "(account_id, user_id, source_chat_id, source_chat_title, parsed_at) "
+                        "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                        (account_id, user_id, int(source_chat_id), source_chat_title),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            return is_new
+
+    def get_parsed_users(self, account_id: int, limit: int = 100, offset: int = 0,
+                         source_chat_id: int = None) -> List[Dict]:
+        """
+        Возвращает список спарсенных пользователей для аккаунта.
+        Если передан source_chat_id — строго фильтрует через parsed_user_sources.
+        Без source_chat_id поведение совместимо с прежним API.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM parsed_users WHERE account_id = ?
-                ORDER BY parsed_at DESC
-                LIMIT ? OFFSET ?
-            ''', (account_id, limit, offset))
+            if source_chat_id is not None:
+                cursor.execute(
+                    "SELECT pu.* FROM parsed_users pu "
+                    "INNER JOIN parsed_user_sources pus "
+                    "ON pus.account_id = pu.account_id AND pus.user_id = pu.user_id "
+                    "WHERE pu.account_id = ? AND pus.source_chat_id = ? "
+                    "ORDER BY pu.parsed_at DESC LIMIT ? OFFSET ?",
+                    (account_id, int(source_chat_id), limit, offset),
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM parsed_users WHERE account_id = ? "
+                    "ORDER BY parsed_at DESC LIMIT ? OFFSET ?",
+                    (account_id, limit, offset),
+                )
             return [dict(row) for row in cursor.fetchall()]
 
     # --- Invite Stats ---
@@ -2236,30 +2508,56 @@ class Database:
         """Добавляет результат инвайта"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO invite_stats (account_id, channel_id, user_id, status, error_message)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (account_id, channel_id, user_id, status, error_message))
+            cursor.execute(
+                "INSERT INTO invite_stats (account_id, channel_id, user_id, status, error_message) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (account_id, channel_id, user_id, status, error_message),
+            )
+
+    def get_invited_user_ids(self, account_id: int, channel_id: int = None,
+                             only_success: bool = False) -> set:
+        """
+        ID пользователей, по которым уже были попытки инвайта.
+        only_success=True — только успешные; иначе любые статусы (skip prior attempts).
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            sql = "SELECT user_id FROM invite_stats WHERE account_id = ?"
+            params = [account_id]
+            if channel_id is not None:
+                sql += " AND channel_id = ?"
+                params.append(int(channel_id))
+            if only_success:
+                sql += " AND status = 'success'"
+            cursor.execute(sql, params)
+            return {row[0] for row in cursor.fetchall()}
 
     def get_invite_stats(self, account_id: int) -> Dict:
-        """Возвращает статистику инвайтов для аккаунта: {total, success, errors, today_count}"""
+        """Возвращает статистику инвайтов. today_count — только successful за сегодня."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
             cursor.execute("SELECT COUNT(*) FROM invite_stats WHERE account_id = ?", (account_id,))
             total = cursor.fetchone()[0]
 
-            cursor.execute("SELECT COUNT(*) FROM invite_stats WHERE account_id = ? AND status = 'success'", (account_id,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM invite_stats WHERE account_id = ? AND status = 'success'",
+                (account_id,),
+            )
             success = cursor.fetchone()[0]
 
-            cursor.execute("SELECT COUNT(*) FROM invite_stats WHERE account_id = ? AND status = 'error'", (account_id,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM invite_stats WHERE account_id = ? AND status = 'error'",
+                (account_id,),
+            )
             errors = cursor.fetchone()[0]
 
             msk_tz = timezone(timedelta(hours=3))
             today = datetime.now(msk_tz).strftime('%Y-%m-%d')
             cursor.execute(
-                "SELECT COUNT(*) FROM invite_stats WHERE account_id = ? AND DATE(invited_at) = ?",
-                (account_id, today)
+                "SELECT COUNT(*) FROM invite_stats "
+                "WHERE account_id = ? AND status = 'success' AND DATE(invited_at) = ?",
+                (account_id, today),
             )
             today_count = cursor.fetchone()[0]
 
@@ -2267,7 +2565,7 @@ class Database:
                 "total": total,
                 "success": success,
                 "errors": errors,
-                "today_count": today_count
+                "today_count": today_count,
             }
 
     # --- Post Queue ---
@@ -2320,24 +2618,62 @@ class Database:
     # --- Mass Send Campaigns ---
     def add_mass_send_campaign(self, account_id: int, name: str, message_template: str,
                                media_path: str = None, media_type: str = None,
-                               target_type: str = "dm") -> int:
+                               target_type: str = "dm", total_targets: int = 0) -> int:
         """Создает кампанию массовой рассылки. Возвращает ID кампании."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO mass_send_campaigns (account_id, name, message_template, media_path, media_type, target_type)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (account_id, name, message_template, media_path, media_type, target_type))
+            cursor.execute("""
+                INSERT INTO mass_send_campaigns
+                    (account_id, name, message_template, media_path, media_type, target_type,
+                     status, total_targets, processed_count)
+                VALUES (?, ?, ?, ?, ?, ?, 'running', ?, 0)
+            """, (account_id, name, message_template, media_path, media_type, target_type,
+                  int(total_targets or 0)))
             return cursor.lastrowid
 
-    def get_mass_send_campaigns(self, account_id: int) -> List[Dict]:
+    def update_mass_send_campaign(self, campaign_id: int, *,
+                                  status: str = None,
+                                  processed_count: int = None,
+                                  total_targets: int = None,
+                                  error_message: str = None,
+                                  finished: bool = False) -> None:
+        """Обновляет lifecycle-поля кампании (status/progress/error/finished_at)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            sets = []
+            params = []
+            if status is not None:
+                sets.append("status = ?")
+                params.append(status)
+            if processed_count is not None:
+                sets.append("processed_count = ?")
+                params.append(int(processed_count))
+            if total_targets is not None:
+                sets.append("total_targets = ?")
+                params.append(int(total_targets))
+            if error_message is not None:
+                sets.append("error_message = ?")
+                params.append(error_message)
+            if finished or (status and status in (
+                'completed', 'failed', 'stopped', 'peer_flood', 'error_threshold'
+            )):
+                sets.append("finished_at = CURRENT_TIMESTAMP")
+            if not sets:
+                return
+            params.append(campaign_id)
+            cursor.execute(
+                f"UPDATE mass_send_campaigns SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+
+    def get_mass_send_campaigns(self, account_id: int):
         """Возвращает список кампаний массовой рассылки для аккаунта"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
+            cursor.execute("""
                 SELECT * FROM mass_send_campaigns WHERE account_id = ?
                 ORDER BY created_at DESC
-            ''', (account_id,))
+            """, (account_id,))
             return [dict(row) for row in cursor.fetchall()]
 
     def add_mass_send_result(self, campaign_id: int, account_id: int, target_id: str,
@@ -2345,31 +2681,58 @@ class Database:
         """Добавляет результат отправки в кампании"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
+            cursor.execute("""
                 INSERT INTO mass_send_results (campaign_id, account_id, target_id, target_type, status, error_message)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (campaign_id, account_id, target_id, target_type, status, error_message))
+            """, (campaign_id, account_id, target_id, target_type, status, error_message))
 
-    def get_campaign_stats(self, campaign_id: int) -> Dict:
-        """Возвращает статистику кампании: {total, sent, blocked, errors}"""
+    def get_campaign_stats(self, campaign_id: int):
+        """Возвращает статистику + lifecycle кампании."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
             cursor.execute("SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ?", (campaign_id,))
             total = cursor.fetchone()[0]
 
-            cursor.execute("SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'sent'", (campaign_id,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'sent'",
+                (campaign_id,),
+            )
             sent = cursor.fetchone()[0]
 
-            cursor.execute("SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'blocked'", (campaign_id,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'blocked'",
+                (campaign_id,),
+            )
             blocked = cursor.fetchone()[0]
 
-            cursor.execute("SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'error'", (campaign_id,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM mass_send_results WHERE campaign_id = ? AND status = 'error'",
+                (campaign_id,),
+            )
             errors = cursor.fetchone()[0]
+
+            cursor.execute("SELECT * FROM mass_send_campaigns WHERE id = ?", (campaign_id,))
+            row = cursor.fetchone()
+            lifecycle = {}
+            if row:
+                crow = dict(row)
+                lifecycle = {
+                    "campaign_id": campaign_id,
+                    "status": crow.get("status"),
+                    "total_targets": crow.get("total_targets") or 0,
+                    "processed_count": crow.get("processed_count") or 0,
+                    "error_message": crow.get("error_message"),
+                    "finished_at": crow.get("finished_at"),
+                    "created_at": crow.get("created_at"),
+                    "target_type": crow.get("target_type"),
+                    "account_id": crow.get("account_id"),
+                }
 
             return {
                 "total": total,
                 "sent": sent,
                 "blocked": blocked,
-                "errors": errors
+                "errors": errors,
+                **lifecycle,
             }

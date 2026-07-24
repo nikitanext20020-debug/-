@@ -8,6 +8,12 @@ from telethon.errors import (
     AuthKeyUnregisteredError, ChatWriteForbiddenError, SlowModeWaitError,
     PeerFloodError, InviteRequestSentError,
 )
+try:
+    from telethon.errors import ChatGuestSendForbiddenError
+except ImportError:  # older Telethon
+    class ChatGuestSendForbiddenError(Exception):
+        """Fallback when Telethon build lacks ChatGuestSendForbiddenError."""
+        pass
 import socks
 import time
 import threading
@@ -38,6 +44,7 @@ from modules.mass_sender import MassSender
 from modules.channel_filter import ChannelFilter
 from utils.logger import Logger, StructuredLogger
 from utils.async_http import close_http_client
+from utils.session_lock import SessionFileLock, SessionLockError
 
 # Глобальный флаг паузы (устанавливается из main.py)
 _global_pause = False
@@ -51,12 +58,14 @@ def is_global_paused() -> bool:
     """Проверяет активна ли глобальная пауза"""
     return _global_pause
 
-# Глобальный флаг для graceful shutdown
+# Process-level flag: only OS signals (SIGTERM/SIGINT) set this.
+# Per-worker stop uses BotWorker._shutdown_flag so stopping one worker
+# does not halt every other worker in the process.
 _shutdown_requested = False
 
 
 def _signal_handler(signum, frame):
-    """Обработчик сигналов SIGTERM и SIGINT"""
+    """Обработчик сигналов SIGTERM и SIGINT (весь процесс)."""
     global _shutdown_requested
     _shutdown_requested = True
     print(f"\n🛑 Получен сигнал {signum}, инициирую graceful shutdown...")
@@ -85,6 +94,10 @@ class BotWorker:
         self.health_monitor = HealthMonitor(db)
         self.client = None
         self.is_running = False
+        # Per-worker shutdown (stop() must not flip process-global flag)
+        self._shutdown_flag = False
+        # Exclusive OS lock for this account's .session file
+        self._session_lock: Optional[SessionFileLock] = None
         
         # Модули
         self.comment_generator = CommentGenerator(Config.GEMINI_API_KEY, db=db)
@@ -209,6 +222,169 @@ class BotWorker:
                 return "pending"
             return False
 
+
+    def _should_stop(self) -> bool:
+        """True if this worker or the whole process should exit the main loop."""
+        return (not self.is_running) or self._shutdown_flag or _shutdown_requested
+
+    def _db_should_pause(self) -> bool:
+        """Account-local pause from DB (preferred) or health_monitor fallback."""
+        try:
+            if hasattr(self.db, "should_pause_account") and self.db.should_pause_account(self.account_id):
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(self.health_monitor.should_pause(self.account_id))
+        except Exception:
+            return False
+
+    def _db_pause_seconds(self) -> int:
+        """Seconds remaining on account pause, if known."""
+        try:
+            if hasattr(self.db, "get_account_pause_seconds"):
+                sec = self.db.get_account_pause_seconds(self.account_id)
+                if sec is not None:
+                    return max(0, int(sec))
+        except Exception:
+            pass
+        try:
+            return max(0, int(self.health_monitor.get_wait_time(self.account_id) or 0))
+        except Exception:
+            return 0
+
+    def _record_account_flood_wait(self, seconds: int):
+        """Record flood/peer-flood pause on the account (DB preferred)."""
+        seconds = int(seconds)
+        try:
+            if hasattr(self.db, "record_flood_wait"):
+                self.db.record_flood_wait(self.account_id, seconds)
+                return
+        except Exception:
+            pass
+        try:
+            self.health_monitor.record_flood_wait(self.account_id, seconds)
+        except Exception:
+            pass
+
+    def _structurally_exclude_channel(self, channel_name: str, reason: str, evidence=None):
+        """
+        Global structural exclusion only — must be backed by proof that the
+        channel has no linked discussion chat (linked_chat_id is absent).
+        Never use for account-local private/write/ban errors.
+        """
+        try:
+            if hasattr(self.db, "exclude_channel_globally"):
+                self.db.exclude_channel_globally(
+                    channel_name,
+                    reason,
+                    evidence=evidence,
+                    source_module="worker",
+                )
+            # Keep can_comment=false in sync for older readers
+            if hasattr(self.db, "update_channel_comments_status"):
+                try:
+                    self.db.update_channel_comments_status(
+                        channel_name,
+                        has_open_comments=False,
+                        structural=True,
+                        reason=reason,
+                        evidence=evidence,
+                        source_module="worker",
+                    )
+                except TypeError:
+                    self.db.update_channel_comments_status(channel_name, has_open_comments=False)
+        except Exception as e:
+            self.log(f"⚠️ structural exclude {channel_name}: {e}", "warning")
+
+    async def _prove_no_linked_chat_and_exclude(self, channel, channel_name: str, reason: str = "no_linked_chat") -> bool:
+        """
+        Call GetFullChannelRequest; if linked_chat_id is absent, structurally
+        exclude the channel globally. Returns True if excluded.
+        Account-local access failures must NOT call this path's false branch
+        as global exclusion — only successful full-channel proof does.
+        """
+        try:
+            full = await self.client(GetFullChannelRequest(channel))
+            linked = getattr(full.full_chat, "linked_chat_id", None)
+            if not linked:
+                self._structurally_exclude_channel(
+                    channel_name,
+                    reason=reason,
+                    evidence={"linked_chat_id": None, "via": "GetFullChannelRequest"},
+                )
+                self.log(
+                    f"🔒 Структурно исключён {channel_name}: нет linked_chat_id",
+                    "warning",
+                )
+                return True
+            return False
+        except Exception as e:
+            # Cannot prove structure — keep account-local only
+            self.log(
+                f"ℹ️ Не удалось доказать отсутствие linked_chat у {channel_name}: {e}",
+                "info",
+            )
+            return False
+
+    async def _handle_guest_send_forbidden(self, channel, channel_name: str, message, post_id, _retried: bool = False):
+        """
+        ChatGuestSendForbiddenError: must join linked discussion, then retry
+        send exactly once. Pending join is NOT a ban. No linked chat =>
+        structural global exclusion. Never leave on guest-forbidden.
+        """
+        if _retried:
+            self.log(
+                f"⚠️ ChatGuestSendForbidden повторно в {channel_name} после join — пропускаю",
+                "warning",
+            )
+            return None
+
+        try:
+            full = await self.client(GetFullChannelRequest(channel))
+        except Exception as e:
+            self.log(f"⚠️ GuestForbidden: GetFullChannel {channel_name}: {e}", "warning")
+            self.db.mark_banned(self.account_id, channel_name)
+            return None
+
+        linked = getattr(full.full_chat, "linked_chat_id", None)
+        if not linked:
+            self._structurally_exclude_channel(
+                channel_name,
+                reason="guest_forbidden_no_linked_chat",
+                evidence={"linked_chat_id": None},
+            )
+            return None
+
+        joined = await self._join_discussion_group_if_needed(linked, channel_name)
+        if joined == "pending":
+            self.log(
+                f"⏳ GuestForbidden: заявка в обсуждения {channel_name} pending — не бан",
+                "info",
+            )
+            return None
+        if not joined:
+            self.log(
+                f"⚠️ GuestForbidden: не удалось вступить в обсуждения {channel_name}",
+                "warning",
+            )
+            self.db.mark_banned(self.account_id, channel_name)
+            return None
+
+        await asyncio.sleep(2)
+        # Retry exactly once; nested guest-forbidden will not re-enter join path
+        try:
+            return await self._send_comment_message(
+                channel, message, post_id, _guest_retry=True, channel_name=channel_name
+            )
+        except ChatGuestSendForbiddenError:
+            self.log(
+                f"⚠️ GuestForbidden после join в {channel_name} — аккаунт-локально",
+                "warning",
+            )
+            self.db.mark_banned(self.account_id, channel_name)
+            return None
+
     def _get_cached_setting(self, key: str, default=None):
         """
         Получает настройку из кэша (TTL 60 сек) или из БД.
@@ -255,26 +431,42 @@ class BotWorker:
         self._send_as_cache[username] = entity
         return entity
 
-    async def _send_comment_message(self, channel, message, post_id):
+    async def _send_comment_message(self, channel, message, post_id, _guest_retry: bool = False, channel_name: str = None):
         """
         Отправляет комментарий к посту.
 
         Если включён тоггл "комментить от имени группы" (send_as) — сначала
         пробует запостить от имени канала. При любой ошибке отправки от имени
         канала — откатывается на отправку от личного аккаунта.
+
+        ChatGuestSendForbiddenError: join linked discussion and retry exactly
+        once (_guest_retry prevents recursion). Never leave on guest-forbidden.
         """
         send_as = await self._resolve_send_as()
-        if send_as is not None:
-            try:
-                return await self.client.send_message(
-                    entity=channel, message=message, comment_to=post_id, send_as=send_as
-                )
-            except Exception as e:
-                self.log(
-                    f"⚠️ Не удалось запостить от имени канала ({e}). Пишу от личного аккаунта.",
-                    "warning",
-                )
-        return await self.client.send_message(entity=channel, message=message, comment_to=post_id)
+        try:
+            if send_as is not None:
+                try:
+                    return await self.client.send_message(
+                        entity=channel, message=message, comment_to=post_id, send_as=send_as
+                    )
+                except ChatGuestSendForbiddenError:
+                    # Guest restriction applies regardless of send_as — handle below
+                    raise
+                except Exception as e:
+                    self.log(
+                        f"⚠️ Не удалось запостить от имени канала ({e}). Пишу от личного аккаунта.",
+                        "warning",
+                    )
+            return await self.client.send_message(entity=channel, message=message, comment_to=post_id)
+        except ChatGuestSendForbiddenError:
+            ch_name = channel_name or (
+                getattr(channel, 'username', None)
+                or getattr(channel, 'title', None)
+                or str(getattr(channel, 'id', channel))
+            )
+            return await self._handle_guest_send_forbidden(
+                channel, ch_name, message, post_id, _retried=_guest_retry,
+            )
 
     async def _verify_comment_published(self, result, name: str) -> bool:
         """
@@ -437,6 +629,13 @@ class BotWorker:
             
             os.makedirs(sessions_dir, exist_ok=True)
             session_path = os.path.join(sessions_dir, self.session_name)
+            # Exclusive OS lock BEFORE opening TelegramClient (cross-process safe)
+            self._session_lock = SessionFileLock(session_path)
+            try:
+                self._session_lock.acquire(timeout=0)
+            except SessionLockError as lock_err:
+                self.log(f"🔒 Сессия уже используется другим процессом/потоком: {lock_err}", "error")
+                raise
             self.client = TelegramClient(session_path, self.api_id, self.api_hash, proxy=proxy)
             
             # Подключаемся (проверяем, возвращается ли корутина)
@@ -542,20 +741,59 @@ class BotWorker:
             self.log(f"❌ Ошибка запуска: {e}", "error")
             self.is_running = False
         finally:
+            self.is_running = False
+            # Always disconnect client, close loop, release session lock
             try:
-                if hasattr(self, 'loop') and self.loop.is_running():
-                    self.loop.close()
-            except: pass
+                if self.client:
+                    try:
+                        if hasattr(self, 'loop') and self.loop and not self.loop.is_closed():
+                            res = self.client.disconnect()
+                            if inspect.isawaitable(res):
+                                try:
+                                    if self.loop.is_running():
+                                        # Shouldn't happen in this thread model; best-effort
+                                        pass
+                                    else:
+                                        self.loop.run_until_complete(res)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'loop') and self.loop and not self.loop.is_closed():
+                    try:
+                        # Cancel leftover tasks
+                        pending = asyncio.all_tasks(self.loop) if hasattr(asyncio, 'all_tasks') else []
+                        for t in list(pending):
+                            t.cancel()
+                        if pending and not self.loop.is_running():
+                            self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception:
+                        pass
+                    try:
+                        self.loop.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                if self._session_lock is not None:
+                    self._session_lock.release()
+                    self._session_lock = None
+            except Exception:
+                pass
 
     async def _run_loop(self):
         cycle = 0
         
-        # Проверяем, не приостановлен ли аккаунт
-        if self.health_monitor.should_pause(self.account_id):
-            wait_time = self.health_monitor.get_wait_time(self.account_id)
+        # Проверяем, не приостановлен ли аккаунт (DB pause)
+        if self._db_should_pause():
+            wait_time = self._db_pause_seconds()
             if wait_time > 0:
                 self.log(f"⏸️ Аккаунт на паузе (rate limit). Ожидание {wait_time} сек...")
-                await asyncio.sleep(wait_time)
+                await asyncio.sleep(min(wait_time, 3600))
         
         # Вступаем в каналы из channels_to_join.txt (включая приватные)
         await self._join_pending_channels()
@@ -564,8 +802,25 @@ class BotWorker:
         self.log("🚀 Синхронизация ваших подписок и каналов...")
         await self._sync_user_subscriptions()
         
-        while self.is_running and not _shutdown_requested:
+        while not self._should_stop():
             try:
+                # Per-cycle account pause from DB (PeerFlood hard pause etc.)
+                if self._db_should_pause():
+                    wait_time = self._db_pause_seconds() or 60
+                    self.log(f"⏸️ Аккаунт на паузе. Ожидание {wait_time} сек...")
+                    # Sleep in chunks so stop() remains responsive
+                    remaining = min(int(wait_time), 43200)
+                    while remaining > 0 and not self._should_stop():
+                        chunk = min(30, remaining)
+                        await asyncio.sleep(chunk)
+                        remaining -= chunk
+                        if self._db_should_pause():
+                            wait_time = self._db_pause_seconds() or remaining
+                            remaining = min(remaining, int(wait_time))
+                        else:
+                            break
+                    continue
+
                 # Проверяем глобальную паузу
                 if is_global_paused():
                     self.log("⏸️ Глобальная пауза, ожидаю...")
@@ -935,8 +1190,13 @@ class BotWorker:
                                     self.db.unlock_channel(name)
                                     continue
                             else:
-                                self.log(f"⚠️ У канала {name} нет группы обсуждений. Помечаю как недоступный.", "warning")
-                                self.db.mark_banned(self.account_id, name)
+                                # Successful GetFullChannel with no linked_chat_id => structural
+                                self.log(f"⚠️ У канала {name} нет группы обсуждений. Структурное исключение.", "warning")
+                                self._structurally_exclude_channel(
+                                    name,
+                                    reason="no_linked_chat",
+                                    evidence={"linked_chat_id": None},
+                                )
                                 self.db.mark_post_processed(self.account_id, name, post.id)
                                 self.db.unlock_channel(name)
                                 continue
@@ -960,11 +1220,14 @@ class BotWorker:
                         self.db.mark_post_processed(self.account_id, name, post.id)
                         self.db.unlock_channel(name)
                         
-                        # Проверяем, все ли аккаунты забанены в этом канале
+                        # Account-local only — all_banned must NOT flip global can_comment
                         ban_stats = self.db.get_ban_stats_for_channel(name)
-                        if ban_stats["all_banned"]:
-                            self.db.update_channel_comments_status(name, has_open_comments=False)
-                            self.log(f"🔒 Все аккаунты ({ban_stats['banned_count']}) забанены в {name}. Помечаю как закрытый.", "warning")
+                        if ban_stats.get("all_banned"):
+                            self.log(
+                                f"ℹ️ Все аккаунты ({ban_stats['banned_count']}) локально забанены в {name}. "
+                                f"Глобально не закрываем (нет structural proof).",
+                                "info",
+                            )
                         continue
 
                     # Комментарии недоступны - помечаем аккаунт как забаненный
@@ -974,11 +1237,20 @@ class BotWorker:
                     self.db.mark_banned(self.account_id, name)
                     self.db.unlock_channel(name)
                     
-                    # Проверяем, все ли аккаунты забанены в этом канале
+                    # Account-local only — no global can_comment=false without linked_chat proof
                     ban_stats = self.db.get_ban_stats_for_channel(name)
-                    if ban_stats["all_banned"]:
-                        self.db.update_channel_comments_status(name, has_open_comments=False)
-                        self.log(f"🔒 Все аккаунты ({ban_stats['banned_count']}) забанены в {name}. Помечаю как закрытый.", "warning")
+                    if ban_stats.get("all_banned"):
+                        # Only structural exclusion if GetFullChannel proves no linked chat
+                        try:
+                            await self._prove_no_linked_chat_and_exclude(
+                                channel, name, reason="no_linked_chat_after_comment_denied"
+                            )
+                        except Exception:
+                            pass
+                        self.log(
+                            f"ℹ️ Все аккаунты ({ban_stats['banned_count']}) локально забанены в {name}.",
+                            "info",
+                        )
                     else:
                         self.log(f"ℹ️ Забанено {ban_stats['banned_count']}/{ban_stats['total_accounts']} аккаунтов в {name}. Другие попробуют.", "info")
                     
@@ -1024,7 +1296,11 @@ class BotWorker:
                     # БЫСТРЫЙ РЕЖИМ: сначала отправляем заглушку
                     placeholder = random.choice(quick_placeholders)
                     try:
-                        result = await self._send_comment_message(channel, placeholder, post.id)
+                        result = await self._send_comment_message(channel, placeholder, post.id, channel_name=name)
+                        if result is None:
+                            self.log(f"⚠️ Быстрый коммент в {name} не отправлен (guest/join path)", "warning")
+                            self.db.unlock_channel(name)
+                            continue
                         self.log(f"⚡ Быстрый коммент отправлен в {name}, генерирую текст...")
                     except Exception as e:
                         self.log(f"❌ Ошибка быстрого комментария в {name}: {e}", "error")
@@ -1096,14 +1372,14 @@ class BotWorker:
                             await self.client.delete_messages(discussion_chat or channel, [result.id])
                         except:
                             pass
-                        result = await self._send_comment_message(channel, comment, post.id)
+                        result = await self._send_comment_message(channel, comment, post.id, channel_name=name)
                 else:
                     # ОБЫЧНЫЙ РЕЖИМ: задержка и отправка
                     delay_mult = Config.MODE_DELAY_MULT.get(mode, 1.0)
                     delay_min = self._get_cached_setting("comment_delay_min", Config.COMMENT_DELAY_MIN)
                     delay_max = self._get_cached_setting("comment_delay_max", Config.COMMENT_DELAY_MAX)
                     
-                    # Режим прогрева - увеличиваем задержки в 2.5 раза (только для обычного р��жима)
+                    # Режим прогрева - увеличиваем задержки в 2.5 раза (только для обычного режима)
                     if self._get_cached_setting("warmup_mode", False):
                         delay_mult *= 2.5
                         self.log(f"🔥 Warmup Mode активен - задержки увеличены в 2.5 раза")
@@ -1112,7 +1388,13 @@ class BotWorker:
                     self.log(f"⏳ Ожидание {delay:.1f} сек. (Режим: {mode})")
                     await asyncio.sleep(delay)
                     
-                    result = await self._send_comment_message(channel, comment, post.id)
+                    result = await self._send_comment_message(channel, comment, post.id, channel_name=name)
+
+                if result is None:
+                    # Guest-forbidden join/retry exhausted or pending — skip without crash
+                    self.log(f"⚠️ Комментарий в {name} не отправлен (guest/join path)", "warning")
+                    self.db.unlock_channel(name)
+                    continue
                 
                 self.db.mark_post_processed(self.account_id, name, post.id)
                 self.db.increment_stat(self.account_id, 'comments')
@@ -1130,7 +1412,7 @@ class BotWorker:
                 
                 self.log(f"✅ Комментарий отправлен в {name}: {log_link}")
 
-                # Проверяем, что коммент реально виден (ловим теневой бан/премодерац��ю)
+                # Проверяем, что коммент реально виден (ловим теневой бан/премодерацию)
                 if self._get_cached_setting("verify_comment_published", True):
                     await self._verify_comment_published(result, name)
                 
@@ -1145,25 +1427,27 @@ class BotWorker:
                     await self._like_random_comments(channel, post.id)
 
             except PeerFloodError as e:
-                # === Тоггл "spambot_unblock" ===
-                # Telegram временно ограничил исходящие — это анти-спам.
+                # PeerFlood = account-level hard pause (12h). Never mark channel banned.
+                # Abort current channel processing; main loop respects DB pause.
                 self._peer_flood_count += 1
+                PEER_FLOOD_PAUSE_SECONDS = 43200  # 12 hours
                 self.log(
-                    f"🚨 PeerFloodError в {name}. Анти-спам Telegram. Счётчик: {self._peer_flood_count}",
+                    f"🚨 PeerFloodError в {name}. Hard pause аккаунта на {PEER_FLOOD_PAUSE_SECONDS}с. "
+                    f"Счётчик: {self._peer_flood_count}",
                     "warning",
                 )
-                self.db.mark_banned(self.account_id, name)
-                self.db.unlock_channel(name)
-                # Записываем в health-monitor (как FloodWait), чтобы воркер встал на паузу
                 try:
-                    self.health_monitor.record_flood_wait(self.account_id, 600)
+                    self.db.unlock_channel(name)
                 except Exception:
                     pass
-                # Если включён тоггл — идём в @SpamBot за статусом
+                self._record_account_flood_wait(PEER_FLOOD_PAUSE_SECONDS)
                 if self._get_cached_setting("spambot_unblock", True):
-                    await self._consult_spambot(reason=f"PeerFloodError на {name}")
-                # Делаем большую паузу прежде чем продолжать
-                await asyncio.sleep(60)
+                    try:
+                        await self._consult_spambot(reason=f"PeerFloodError на {name}")
+                    except Exception:
+                        pass
+                # Abort processing this cycle — do NOT sleep-and-continue on channels
+                return
 
             except FloodWaitError as e:
                 # Обработка FloodWait с буфером +10 секунд
@@ -1187,35 +1471,55 @@ class BotWorker:
                 await asyncio.sleep(e.seconds + 5)  # +5 сек запаса
             
             except ChannelPrivateError:
-                # Канал приватный или нас забанили - помечаем аккаунт как забаненный
+                # Account-local only — NEVER set global can_comment=false from private/access
                 self.log(f"⚠️ Канал {name} приватный/недоступен для этого аккаунта", "warning")
                 self.db.mark_banned(self.account_id, name)
                 self.db.unlock_channel(name)
-                
-                # Проверяем, все ли аккаунты забанены
-                ban_stats = self.db.get_ban_stats_for_channel(name)
-                if ban_stats["all_banned"]:
-                    self.db.update_channel_comments_status(name, has_open_comments=False)
-                    self.log(f"🔒 Все аккаунты забанены в {name}. Помечаю как закрытый.", "warning")
             
             except ChatWriteForbiddenError:
-                # Нет прав писать в этом чате - помечаем как забанен в канале, НЕ ошибка аккаунта
+                # Account-local only — NEVER set global can_comment=false from write-forbidden
                 self.log(f"⚠️ Нет прав писать в {name}, помечаю как забанен в канале", "warning")
                 self.db.mark_banned(self.account_id, name)
                 self.db.mark_post_processed(self.account_id, name, post.id)
                 self.db.unlock_channel(name)
 
                 # === Тоггл "leave_if_no_write" ===
-                # Если включён — выходим из дискуссионной группы
+                # If enabled — leave discussion group (NOT on ChatGuestSendForbidden)
                 if self._get_cached_setting("leave_if_no_write", True):
                     await self._safe_leave_discussion_group(channel, name)
-                
-                # Проверяем, все ли аккаунты забанены
-                ban_stats = self.db.get_ban_stats_for_channel(name)
-                if ban_stats["all_banned"]:
-                    self.db.update_channel_comments_status(name, has_open_comments=False)
-                    self.log(f"🔒 Все аккаунты забанены в {name}. Помечаю как закрытый.", "warning")
             
+            except ChatGuestSendForbiddenError:
+                # Safety net if error bubbles outside _send_comment_message.
+                # Join+single-retry lives in _send_comment_message; here only
+                # mark account-local and unlock (no resend, no recursion).
+                self.log(f"⚠️ ChatGuestSendForbiddenError в {name} (safety net)", "warning")
+                try:
+                    # Ensure discussion join attempted once without send retry
+                    full = await self.client(GetFullChannelRequest(channel))
+                    linked = getattr(full.full_chat, "linked_chat_id", None)
+                    if not linked:
+                        self._structurally_exclude_channel(
+                            name,
+                            reason="guest_forbidden_no_linked_chat",
+                            evidence={"linked_chat_id": None},
+                        )
+                    else:
+                        joined = await self._join_discussion_group_if_needed(linked, name)
+                        if joined == "pending":
+                            self.log(f"⏳ GuestForbidden pending join for {name} — not a ban", "info")
+                        elif not joined:
+                            self.db.mark_banned(self.account_id, name)
+                except Exception as ge:
+                    self.log(f"⚠️ guest-forbidden safety net: {ge}", "warning")
+                    try:
+                        self.db.mark_banned(self.account_id, name)
+                    except Exception:
+                        pass
+                try:
+                    self.db.unlock_channel(name)
+                except Exception:
+                    pass
+
             except (UserDeactivatedBanError, AuthKeyUnregisteredError) as e:
                 # Аккаунт забанен или деактивирован
                 self.log(f"🚫 Аккаунт забанен/деактивирован: {e}", "error")
@@ -1251,11 +1555,13 @@ class BotWorker:
                     self.db.mark_post_processed(self.account_id, name, post.id)
                     self.db.unlock_channel(name)  # Разблокируем канал
                     
-                    # Проверяем, все ли аккаунты забанены
+                    # Account-local only — never global can_comment from write/access errors
                     ban_stats = self.db.get_ban_stats_for_channel(name)
-                    if ban_stats["all_banned"]:
-                        self.db.update_channel_comments_status(name, has_open_comments=False)
-                        self.log(f"🔒 Все аккаунты забанены в {name}. Помечаю как закрытый.", "warning")
+                    if ban_stats.get("all_banned"):
+                        self.log(
+                            f"ℹ️ Все аккаунты локально забанены в {name} (без structural proof).",
+                            "info",
+                        )
                     continue  # НЕ считаем ошибкой аккаунта!
                 
                 # Проверяем статус аккаунта - если frozen, не удаляем каналы
@@ -1301,8 +1607,11 @@ class BotWorker:
                     self.db.mark_banned(self.account_id, name)
                     self.db.unlock_channel(name)  # Разблокируем канал
                     ban_stats = self.db.get_ban_stats_for_channel(name)
-                    if ban_stats["all_banned"]:
-                        self.db.update_channel_comments_status(name, has_open_comments=False)
+                    if ban_stats.get("all_banned"):
+                        self.log(
+                            f"ℹ️ Все аккаунты локально забанены в {name} (invite hash / private).",
+                            "info",
+                        )
                     continue
                 
                 # Ошибки доступа к каналу - помечаем аккаунт как забаненный
@@ -1311,11 +1620,13 @@ class BotWorker:
                     self.db.mark_banned(self.account_id, name)
                     self.db.unlock_channel(name)  # Разблокируем канал
                     
-                    # Проверяем, все ли аккаунты забанены
+                    # Account-local only — never global can_comment from write/access errors
                     ban_stats = self.db.get_ban_stats_for_channel(name)
-                    if ban_stats["all_banned"]:
-                        self.db.update_channel_comments_status(name, has_open_comments=False)
-                        self.log(f"🔒 Все аккаунты забанены в {name}. Помечаю как закрытый.", "warning")
+                    if ban_stats.get("all_banned"):
+                        self.log(
+                            f"ℹ️ Все аккаунты локально забанены в {name} (без structural proof).",
+                            "info",
+                        )
                     continue  # НЕ считаем ошибкой аккаунта!
                 
                 # Не состоим в канале/группе - пропускаем без ошибки
@@ -1337,7 +1648,7 @@ class BotWorker:
                                 self.log(f"⚠️ Не удалось вступить в группу обсуждений {name}. Помечаю.", "warning")
                                 self.db.mark_banned(self.account_id, name)
                     except Exception as join_err:
-                        # Помечаем канал как забане��ный чтобы не пытаться снова
+                        # Помечаем канал как забаненный чтобы не пытаться снова
                         self.log(f"⚠️ Не удалось вступить в группу обсуждений {name}: {join_err}. Помечаю.", "warning")
                         self.db.mark_banned(self.account_id, name)
                     self.db.unlock_channel(name)  # Разблокируем канал
@@ -1608,7 +1919,7 @@ class BotWorker:
                                 )
                                 self.db.update_channel_info(channel, channel_id=channel_id, title=real_title)
                             except Exception as e:
-                                self.log(f"⚠️ Не удалось получить название ��анала {channel}: {e}", "warning")
+                                self.log(f"⚠️ Не удалось получить название канала {channel}: {e}", "warning")
                                 # Сохраняем с хэшем как названием
                                 self.db.add_found_channel(
                                     channel=channel,
@@ -2616,7 +2927,7 @@ class BotWorker:
                         f"🗑️ Вышел из мусорного чата '{title}' "
                         f"(reason: {verdict.reason}, conf: {verdict.confidence:.2f})"
                     )
-                    # Анти-флуд: па��за между LeaveChannelRequest
+                    # Анти-флуд: пауза между LeaveChannelRequest
                     await asyncio.sleep(random.uniform(8.0, 15.0))
                 except FloodWaitError as fw:
                     self.log(f"⏳ FloodWait при отписке: {fw.seconds}с — стопим скан", "warning")
@@ -2693,12 +3004,12 @@ class BotWorker:
                 self.log(f"⚠️ Ошибка отключения Telegram: {e}", "warning")
 
     def stop(self):
-        """Останавливает воркер с graceful shutdown"""
-        global _shutdown_requested
-        
+        """Останавливает ТОЛЬКО этот воркер (не трогает process-level flag)."""
         self.log("🛑 Останавливаю воркер...")
         self.is_running = False
-        _shutdown_requested = True
+        self._shutdown_flag = True
+        # NOTE: do NOT set process-global _shutdown_requested here —
+        # that flag is reserved for SIGTERM/SIGINT so other workers keep running.
         
         # Отменяем все pending tasks
         self._cancel_pending_tasks()
@@ -2725,27 +3036,33 @@ class BotWorker:
             except Exception:
                 pass
         
-        if self.client:
-            try:
-                # Пытаемся отключиться корректно через сохраненный loop
-                if hasattr(self, 'loop') and self.loop.is_running():
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._graceful_shutdown(), 
-                        self.loop
-                    )
-                    # Ждем завершения отключения
-                    try:
-                        future.result(timeout=10)
-                    except Exception as e:
-                        self.log(f"⚠️ Timeout при shutdown: {e}", "warning")
-                else:
-                    # Синхронное отключение
-                    try:
-                        self.client.disconnect()
-                    except:
-                        pass
-            except Exception as e:
-                self.log(f"⚠️ Ошибка при остановке: {e}", "warning")
-        
+        try:
+            if self.client:
+                try:
+                    # Пытаемся отключиться корректно через сохраненный loop
+                    if hasattr(self, 'loop') and self.loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._graceful_shutdown(),
+                            self.loop
+                        )
+                        # Ждем завершения отключения
+                        try:
+                            future.result(timeout=10)
+                        except Exception as e:
+                            self.log(f"⚠️ Timeout при shutdown: {e}", "warning")
+                    else:
+                        # Синхронное отключение
+                        try:
+                            self.client.disconnect()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    self.log(f"⚠️ Ошибка при остановке: {e}", "warning")
+        finally:
+            # SessionFileLock освобождается только в _init_and_run.finally после
+            # фактического завершения потока и закрытия TelegramClient. Иначе при
+            # timeout shutdown другой процесс смог бы открыть ещё занятую SQLite-сессию.
+            pass
+
         self.log("🛑 Воркер остановлен")
 

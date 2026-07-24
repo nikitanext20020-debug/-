@@ -51,6 +51,38 @@ class ChannelFilter:
                 pass
         print(f"[ChannelFilter] {message}")
 
+    def _is_globally_excluded(self, channel: str) -> bool:
+        try:
+            if self.db and hasattr(self.db, "is_channel_globally_excluded"):
+                return bool(self.db.is_channel_globally_excluded(channel))
+        except Exception:
+            return False
+        return False
+
+    def _structurally_exclude(self, channel: str, reason: str = "no_linked_chat", evidence=None):
+        try:
+            if hasattr(self.db, "exclude_channel_globally"):
+                self.db.exclude_channel_globally(
+                    channel,
+                    reason,
+                    evidence=evidence,
+                    source_module="channel_filter",
+                )
+            if hasattr(self.db, "update_channel_comments_status"):
+                try:
+                    self.db.update_channel_comments_status(
+                        channel,
+                        has_open_comments=False,
+                        structural=True,
+                        reason=reason,
+                        evidence=evidence,
+                        source_module="channel_filter",
+                    )
+                except TypeError:
+                    self.db.update_channel_comments_status(channel, has_open_comments=False)
+        except Exception as e:
+            self._log(f"structural exclude {channel}: {e}", "warning")
+
     async def get_filter_progress(self) -> Dict:
         """Возвращает текущий прогресс фильтрации"""
         return dict(self._progress)
@@ -159,6 +191,18 @@ class ChannelFilter:
                 self._log("Фильтрация остановлена")
                 break
 
+            if self._is_globally_excluded(channel):
+                result = {
+                    "channel": channel,
+                    "status": "rejected",
+                    "reason": "globally_excluded",
+                    "stats": {},
+                }
+                self._results.append(result)
+                self._progress['rejected'] += 1
+                self._progress['processed'] = i + 1
+                continue
+
             result = await self._check_channel(
                 channel,
                 min_subscribers=min_subscribers,
@@ -231,8 +275,10 @@ class ChannelFilter:
                 result['reason'] = 'Канал не существует или недоступен'
                 return result
             except ChannelPrivateError:
+                # Account/access-local failure — do NOT structural-exclude globally
                 result['status'] = 'rejected'
                 result['reason'] = 'Канал приватный, нет доступа'
+                result['stats']['local_only'] = True
                 return result
 
             # Проверяем что это канал
@@ -264,10 +310,17 @@ class ChannelFilter:
                 result['reason'] = f'Мало подписчиков: {subscribers} < {min_subscribers}'
                 return result
 
-            # 4. Проверка открытых комментариев
+            # 4. Проверка открытых комментариев — structural proof via linked_chat_id
             if require_open_comments and not linked_chat_id:
+                # Successful GetFullChannel with no linked chat => structural global exclusion
+                self._structurally_exclude(
+                    channel,
+                    reason="no_linked_chat",
+                    evidence={"linked_chat_id": None},
+                )
                 result['status'] = 'rejected'
-                result['reason'] = 'Комментарии закрыты'
+                result['reason'] = 'no_linked_chat'
+                result['stats']['structural_exclude'] = True
                 return result
 
             # 5. Получаем последние 10 постов

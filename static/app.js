@@ -48,15 +48,13 @@ const API = {
 // ============ TOAST ============
 const toastEl = document.getElementById('toast');
 function toast(msg, kind = '') {
-  // Дублируем в консоль браузера, чтобы события были видны и там
-  const tag = kind === 'error' ? 'ERROR' : (kind === 'ok' ? 'OK' : 'INFO');
-  const line = `[panel][${tag}] ${msg}`;
-  if (kind === 'error') console.error(line); else console.log(line);
   if (!toastEl) return;
   toastEl.className = 'toast';
   toastEl.classList.add('show');
   if (kind) toastEl.classList.add(`toast-${kind}`);
   toastEl.textContent = msg;
+  toastEl.setAttribute('role', 'status');
+  toastEl.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
   clearTimeout(toast._t);
   toast._t = setTimeout(() => toastEl.classList.remove('show'), 3200);
 }
@@ -532,6 +530,12 @@ const Channels = {
     }
     document.getElementById('ch-total').textContent = this.data.length;
     document.getElementById('ch-open').textContent  = this.data.filter(c => c.can_comment).length;
+    try {
+      const excluded = await API.get('/discovery/exclusions?limit=5000');
+      document.getElementById('ch-excluded').textContent = Array.isArray(excluded) ? excluded.length : 0;
+    } catch {
+      document.getElementById('ch-excluded').textContent = '—';
+    }
     this.render();
   },
   render() {
@@ -554,10 +558,10 @@ const Channels = {
         <td class="muted small">${escape(c.source || '—')}</td>
         <td class="muted small">${escape((c.last_checked || '').slice(0, 16))}</td>
         <td>
-          <button class="btn btn-ghost btn-sm ${c.is_pinned ? 'pinned' : ''}" data-pin="${escape(c.channel)}" data-pinned="${c.is_pinned ? '1' : '0'}" title="${c.is_pinned ? 'Закреплён (защищён от очистки) — нажмите чтобы открепить' : 'Закрепить (защитить от очистки)'}">${c.is_pinned ? '🔒' : '🔓'}</button>
-          <button class="btn btn-ghost btn-sm" data-recheck="${escape(c.channel)}" title="Перепроверить">↻</button>
-          <button class="btn btn-ghost btn-sm" data-comment="${escape(c.channel)}" title="Комментить сейчас">✎</button>
-          <button class="btn btn-ghost btn-sm" data-del="${escape(c.channel)}" title="Удалить">×</button>
+          <button type="button" class="btn btn-ghost btn-sm ${c.is_pinned ? 'pinned' : ''}" data-pin="${escape(c.channel)}" data-pinned="${c.is_pinned ? '1' : '0'}" title="${c.is_pinned ? 'Закреплён (защищён от очистки) — нажмите чтобы открепить' : 'Закрепить (защитить от очистки)'}" aria-label="${c.is_pinned ? 'Открепить канал' : 'Закрепить канал'}">${c.is_pinned ? '🔒' : '🔓'}</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-recheck="${escape(c.channel)}" title="Перепроверить" aria-label="Перепроверить канал">↻</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-comment="${escape(c.channel)}" title="Комментить сейчас" aria-label="Комментировать сейчас">✎</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-del="${escape(c.channel)}" title="Удалить" aria-label="Удалить канал">×</button>
         </td>
       </tr>
     `).join('');
@@ -1283,6 +1287,8 @@ document.getElementById('btn-clear-stats')?.addEventListener('click', async () =
 // ============ COMMENTS ============
 const Comments = {
   data: [],
+  expanded: new Set(),
+  COLLAPSE_AT: 160,
   async refresh() {
     const tbody = document.getElementById('comments-tbody');
     const accId = document.getElementById('cm-acc-select').value;
@@ -1293,6 +1299,19 @@ const Comments = {
       return;
     }
     this.render();
+  },
+  renderTextCell(c) {
+    const full = c.comment_text || '';
+    const long = full.length > this.COLLAPSE_AT || full.split('\n').length > 3;
+    const open = this.expanded.has(c.id);
+    const clampedClass = long && !open ? ' is-clamped' : '';
+    const btn = long
+      ? `<button type="button" class="comment-expand" data-expand="${c.id}" aria-expanded="${open ? 'true' : 'false'}">${open ? 'Свернуть' : 'Показать полностью'}</button>`
+      : '';
+    return `<div class="comment-text-cell">
+      <div class="comment-text${clampedClass}" id="comment-text-${c.id}">${escape(full)}</div>
+      ${btn}
+    </div>`;
   },
   render() {
     const q = (document.getElementById('comments-search').value || '').toLowerCase().trim();
@@ -1312,15 +1331,23 @@ const Comments = {
       return `
         <tr>
           <td>${chCell}<div class="muted small">${escape(c.account_phone || '')}</div></td>
-          <td>${escape((c.comment_text || '').slice(0, 120))}</td>
+          <td>${this.renderTextCell(c)}</td>
           <td>${typeLabel}</td>
           <td class="muted small">${escape((c.sent_at || '').slice(0, 16))}</td>
           <td>
-            <button class="btn btn-ghost btn-sm" data-edit="${c.id}" title="Редактировать">✎</button>
-            <button class="btn btn-ghost btn-sm" data-del="${c.id}" title="Удалить">×</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-edit="${c.id}" title="Редактировать" aria-label="Редактировать комментарий">✎</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-del="${c.id}" title="Удалить" aria-label="Удалить комментарий">×</button>
           </td>
         </tr>`;
     }).join('');
+    tbody.querySelectorAll('[data-expand]').forEach(b => {
+      b.addEventListener('click', () => {
+        const id = +b.dataset.expand;
+        if (this.expanded.has(id)) this.expanded.delete(id);
+        else this.expanded.add(id);
+        this.render();
+      });
+    });
     tbody.querySelectorAll('[data-edit]').forEach(b => {
       b.addEventListener('click', () => this.edit(+b.dataset.edit));
     });
@@ -1457,10 +1484,16 @@ document.getElementById('btn-filter-apply')?.addEventListener('click', (e) => { 
 // ============ INVITER ============
 const Inviter = {
   accId() { return document.getElementById('inv-acc-select').value; },
+  users: [],
   async refresh() {
     accSelectFill('inv-acc-select');
     const id = this.accId();
-    if (!id) return;
+    if (!id) {
+      this.users = [];
+      this.renderUsers();
+      this.updateStartEnabled();
+      return;
+    }
     try {
       const s = await API.get(`/accounts/${id}/inviter/stats`);
       document.getElementById('inv-parsed').textContent = (s.total ?? 0);
@@ -1468,58 +1501,135 @@ const Inviter = {
       document.getElementById('inv-errors').textContent = (s.errors ?? 0);
       document.getElementById('inv-today').textContent = (s.today_count ?? 0);
     } catch (e) { /* ignore */ }
-    this.loadChats();
+    await Promise.all([this.loadChats(), this.loadUsers()]);
+    this.updateStartEnabled();
   },
   async loadChats() {
     const id = this.accId();
     const sel = document.getElementById('inv-chats-select');
+    if (!sel) return;
     if (!id) { sel.innerHTML = '<option value="">Выберите аккаунт</option>'; return; }
     sel.innerHTML = '<option value="">— загрузка —</option>';
     try {
       const chats = await API.get(`/accounts/${id}/inviter/chats`);
-      sel.innerHTML = '<option value="">— выберите чат —</option>' +
-        (chats || []).map(c => `<option value="${escape(String(c.id ?? c.username ?? ''))}">${escape(c.title || c.username || c.id)}</option>`).join('');
+      sel.innerHTML = '<option value="">— выберите чат-источник —</option>' +
+        (chats || []).map(c => {
+          const uname = c.username ? ('@' + String(c.username).replace(/^@/, '')) : '';
+          // Prefer @username for source parse; keep numeric id in data-id for target resolve
+          const val = uname || String(c.id ?? '');
+          const label = (c.title || uname || c.id) + (c.id != null ? ` (${c.id})` : '');
+          return `<option value="${escape(val)}" data-id="${escape(String(c.id ?? ''))}">${escape(label)}</option>`;
+        }).join('');
     } catch (e) { sel.innerHTML = '<option value="">Не удалось загрузить (аккаунт запущен?)</option>'; }
   },
+  async loadUsers() {
+    const id = this.accId();
+    if (!id) { this.users = []; this.renderUsers(); return; }
+    try {
+      this.users = await API.get(`/accounts/${id}/inviter/users?limit=200`) || [];
+    } catch (e) {
+      this.users = [];
+    }
+    this.renderUsers();
+  },
+  renderUsers() {
+    const tbody = document.getElementById('inv-users-tbody');
+    const countEl = document.getElementById('inv-users-count');
+    if (!tbody) return;
+    const n = this.users.length;
+    if (countEl) countEl.textContent = n ? `${n} (показано до 200)` : '0';
+    if (!n) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">Нет спарсенных кандидатов</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = this.users.map(u => {
+      const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || '—';
+      const uname = u.username ? '@' + String(u.username).replace(/^@/, '') : '—';
+      const src = u.source_chat_title || u.source_chat_id || '—';
+      return `<tr>
+        <td class="mono">${escape(String(u.user_id ?? u.id ?? '—'))}</td>
+        <td>${escape(uname)}</td>
+        <td>${escape(name)}</td>
+        <td class="muted small">${escape(String(src))}</td>
+      </tr>`;
+    }).join('');
+  },
+  updateStartEnabled() {
+    const btn = document.getElementById('btn-invite-start');
+    if (!btn) return;
+    const source = (document.getElementById('inv-source-override')?.value
+      || document.getElementById('inv-source-chat')?.value || '').trim();
+    const target = (document.getElementById('inv-target-channel')?.value || '').trim();
+    const hasCandidates = this.users.length > 0 || !!source;
+    btn.disabled = !target || !hasCandidates;
+  },
 };
+
 document.getElementById('btn-refresh-inviter')?.addEventListener('click', () => Inviter.refresh());
 document.getElementById('inv-acc-select')?.addEventListener('change', () => Inviter.refresh());
 document.getElementById('inv-chats-select')?.addEventListener('change', (e) => {
-  const f = document.getElementById('form-parse-users');
-  if (e.target.value) f.chat_id.value = e.target.value;
+  const sourceInput = document.getElementById('inv-source-chat');
+  if (sourceInput && e.target.value) sourceInput.value = e.target.value;
+  const override = document.getElementById('inv-source-override');
+  if (override && e.target.value && !override.value) override.value = e.target.value;
+  Inviter.updateStartEnabled();
+});
+['inv-source-chat', 'inv-source-override', 'inv-target-channel'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', () => Inviter.updateStartEnabled());
 });
 document.getElementById('form-parse-users')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = Inviter.accId();
   if (!id) { toast('Выберите аккаунт', 'error'); return; }
-  const chat = e.target.chat_id.value.trim();
+  const chat = (e.target.chat_id.value || '').trim();
   const status = document.getElementById('parse-status');
   status.textContent = 'Парсинг…';
   try {
     const r = await API.post(`/accounts/${id}/inviter/parse`, { chat_id: chat });
     status.textContent = `Спарсено: ${r.parsed_count ?? 0}`;
     toast(`Спарсено пользователей: ${r.parsed_count ?? 0}`, 'ok');
-    Inviter.refresh();
+    await Inviter.refresh();
   } catch (err) { status.textContent = ''; toast(err.message, 'error'); }
 });
 document.getElementById('form-invite-start')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = Inviter.accId();
   if (!id) { toast('Выберите аккаунт', 'error'); return; }
+  const targetRaw = (e.target.channel_id.value || '').trim();
+  const sourceRaw = (e.target.source_chat_id.value || '').trim() || null;
+  const dailyLimit = e.target.daily_limit.value ? +e.target.daily_limit.value : null;
+  const candidateCount = Inviter.users.length;
+  if (!targetRaw) { toast('Укажите целевой канал/группу', 'error'); return; }
+  if (!sourceRaw && !candidateCount) {
+    toast('Нет источника и нет спарсенных кандидатов', 'error');
+    return;
+  }
+
+  const limitLabel = dailyLimit != null ? dailyLimit : 'по умолчанию';
+  const srcLabel = sourceRaw || 'уже спарсенные кандидаты';
+  if (!confirm(
+    `Запустить инвайт?\n\nИсточник: ${srcLabel}\nЦель: ${targetRaw}\nКандидатов в списке: ${candidateCount}\nЛимит: ${limitLabel}\n\nЦель будет проверена Telegram перед запуском. Ограничения не обходятся. Продолжить?`
+  )) return;
+
   const body = {
-    channel_id: +e.target.channel_id.value,
-    source_chat_id: e.target.source_chat_id.value.trim() || null,
-    daily_limit: e.target.daily_limit.value ? +e.target.daily_limit.value : null,
+    channel_id: targetRaw,
+    source_chat_id: sourceRaw || null,
+    daily_limit: dailyLimit,
   };
   try {
     const r = await API.post(`/accounts/${id}/inviter/start`, body);
     toast((r && r.message) || 'Инвайт запущен', 'ok');
+    Inviter.refresh();
   } catch (err) { toast(err.message, 'error'); }
 });
 
 // ============ MASS SEND ============
 const MassSend = {
   accId() { return document.getElementById('ms-acc-select').value; },
+  dmPreview: null,
+  groupPreview: null,
+  _timers: {},
+
   async refresh() {
     accSelectFill('ms-acc-select');
     const tbody = document.getElementById('ms-campaigns-tbody');
@@ -1543,18 +1653,243 @@ const MassSend = {
       tbody.innerHTML = rows.join('');
     } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty">Ошибка: ${escape(e.message)}</td></tr>`; }
   },
-  parseIds(raw) {
-    return (raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+
+  /** Split raw text into tokens (comma / whitespace / newlines). */
+  tokenize(raw) {
+    return (raw || '')
+      .split(/[\n,;]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+  },
+
+  /**
+   * Normalize a single target token into a canonical string id/username.
+   * Accepts: plain IDs, @username, t.me links, tg://user?id=
+   * Does NOT coerce usernames to Number.
+   */
+  normalizeToken(token, targetType) {
+    let s = String(token || '').trim();
+    if (!s) return { ok: false, value: s, reason: 'пусто' };
+
+    // tg://user?id=123456
+    let m = s.match(/^tg:\/\/user\?(?:.*&)?id=(\d+)/i);
+    if (m) {
+      if (targetType === 'group') return { ok: false, value: s, reason: 'это пользователь, а не группа' };
+      return { ok: true, value: m[1], kind: 'user_id' };
+    }
+
+    // strip wrapping angle brackets
+    s = s.replace(/^<|>$/g, '');
+
+    // Internal group link: t.me/c/<id>/<message> → -100<id>
+    m = s.match(/^(?:https?:\/\/)?(?:www\.)?t\.me\/c\/(\d+)(?:\/\d+)?/i);
+    if (m) {
+      if (targetType === 'user') return { ok: false, value: s, reason: 'это группа, а не пользователь' };
+      return { ok: true, value: `-100${m[1]}`, kind: 'chat_id' };
+    }
+
+    // URL: https://t.me/username or t.me/username
+    m = s.match(/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me)\/([A-Za-z0-9_]+)/i);
+    if (m) {
+      const u = m[1];
+      if (/^joinchat$/i.test(u) || u.startsWith('+')) {
+        return { ok: false, value: s, reason: 'invite-ссылки не поддерживаются' };
+      }
+      return { ok: true, value: '@' + u, kind: 'username' };
+    }
+
+    // @username
+    if (s.startsWith('@')) {
+      const u = s.slice(1);
+      if (!/^[A-Za-z0-9_]{4,}$/i.test(u) && !/^[A-Za-z0-9_]+$/i.test(u)) {
+        return { ok: false, value: s, reason: 'некорректный username' };
+      }
+      return { ok: true, value: '@' + u, kind: 'username' };
+    }
+
+    // plain numeric id: положительный user id, отрицательный chat/channel id
+    if (/^-?\d+$/.test(s)) {
+      const isGroupId = s.startsWith('-');
+      if (targetType === 'user' && isGroupId) {
+        return { ok: false, value: s, reason: 'это группа, а не пользователь' };
+      }
+      if (targetType === 'group' && !isGroupId) {
+        return { ok: false, value: s, reason: 'для группы нужен @username или id вида -100…' };
+      }
+      return { ok: true, value: s, kind: isGroupId ? 'chat_id' : 'user_id' };
+    }
+
+    // bare username without @
+    if (/^[A-Za-z][A-Za-z0-9_]{3,}$/.test(s)) {
+      return { ok: true, value: '@' + s, kind: 'username' };
+    }
+
+    return { ok: false, value: s, reason: 'не распознано' };
+  },
+
+  localPreview(raw, targetType) {
+    const tokens = this.tokenize(raw);
+    const valid = [];
+    const invalid = [];
+    const seen = new Map();
+    const duplicates = [];
+    for (const t of tokens) {
+      const n = this.normalizeToken(t, targetType);
+      if (!n.ok) {
+        invalid.push({ raw: t, reason: n.reason });
+        continue;
+      }
+      const key = n.value.toLowerCase();
+      if (seen.has(key)) {
+        duplicates.push({ raw: t, value: n.value });
+        continue;
+      }
+      seen.set(key, true);
+      valid.push({ raw: t, value: n.value, kind: n.kind });
+    }
+    return {
+      valid_count: valid.length,
+      invalid_count: invalid.length,
+      duplicate_count: duplicates.length,
+      valid,
+      invalid,
+      duplicates,
+      sample: valid.slice(0, 8).map(v => v.value),
+    };
+  },
+
+  async serverPreview(raw, targetType) {
+    const tokens = this.tokenize(raw);
+    if (!tokens.length) return null;
+    try {
+      const r = await API.post('/telegram-targets/preview', {
+        targets: tokens,
+        target_type: targetType, // 'user' | 'group'
+      });
+      return r;
+    } catch (e) {
+      // Endpoint may be unavailable — fall back to local only
+      return { _local_only: true, error: e.message };
+    }
+  },
+
+  mergePreview(local, server) {
+    if (!server || server._local_only) return { ...local, source: 'local', server_error: server && server.error };
+    // Prefer server counts when present
+    return {
+      valid_count: server.valid_count ?? server.valid?.length ?? local.valid_count,
+      invalid_count: server.invalid_count ?? server.invalid?.length ?? local.invalid_count,
+      duplicate_count: server.duplicate_count ?? server.duplicates?.length ?? local.duplicate_count,
+      valid: server.valid || local.valid,
+      invalid: server.invalid || local.invalid,
+      duplicates: server.duplicates || local.duplicates,
+      sample: server.sample || local.sample,
+      source: 'server',
+    };
+  },
+
+  renderPreview(elId, preview, btnId) {
+    const root = document.getElementById(elId);
+    const btn = document.getElementById(btnId);
+    if (!root) return;
+    const stats = root.querySelector('.target-preview-stats');
+    const sample = root.querySelector('.target-preview-sample');
+    if (!preview || (preview.valid_count === 0 && preview.invalid_count === 0 && preview.duplicate_count === 0)) {
+      stats.innerHTML = '<span class="muted">Введите цели для проверки</span>';
+      sample.hidden = true;
+      sample.innerHTML = '';
+      if (btn) btn.disabled = true;
+      return;
+    }
+    stats.innerHTML = `
+      <span class="stat-ok">валидных: <b>${preview.valid_count}</b></span>
+      <span class="stat-bad">невалидных: <b>${preview.invalid_count}</b></span>
+      <span class="stat-dup">дубликатов: <b>${preview.duplicate_count}</b></span>
+      ${preview.source === 'local' ? '<span class="muted">(локальная проверка)</span>' : ''}
+    `;
+    const items = [];
+    const validList = preview.valid || [];
+    const sampleVals = preview.sample
+      || validList.slice(0, 8).map(v => (typeof v === 'string' ? v : (v.value || v.raw || v)));
+    sampleVals.slice(0, 8).forEach(v => {
+      items.push(`<li>${escape(String(v))}</li>`);
+    });
+    (preview.invalid || []).slice(0, 5).forEach(v => {
+      const label = typeof v === 'string' ? v : `${v.raw || v.value || ''}${v.reason ? ' — ' + v.reason : ''}`;
+      items.push(`<li class="is-invalid">${escape(String(label))}</li>`);
+    });
+    if (items.length) {
+      sample.hidden = false;
+      sample.innerHTML = items.join('');
+    } else {
+      sample.hidden = true;
+      sample.innerHTML = '';
+    }
+    const ok = preview.valid_count > 0 && preview.invalid_count === 0;
+    if (btn) btn.disabled = !ok;
+  },
+
+  schedulePreview(kind) {
+    clearTimeout(this._timers[kind]);
+    this._timers[kind] = setTimeout(() => this.runPreview(kind), 350);
+  },
+
+  async runPreview(kind) {
+    const isDm = kind === 'dm';
+    const raw = document.getElementById(isDm ? 'ms-dm-targets' : 'ms-group-targets')?.value || '';
+    const targetType = isDm ? 'user' : 'group';
+    const local = this.localPreview(raw, targetType);
+    // Always show local immediately
+    const elId = isDm ? 'ms-dm-preview' : 'ms-group-preview';
+    const btnId = isDm ? 'btn-ms-dm-start' : 'btn-ms-group-start';
+    this.renderPreview(elId, { ...local, source: 'local' }, btnId);
+    if (isDm) this.dmPreview = local; else this.groupPreview = local;
+
+    if (!raw.trim()) return;
+    const server = await this.serverPreview(raw, targetType);
+    const merged = this.mergePreview(local, server);
+    // If server returned structured valid list of strings, map targets for submit
+    if (server && !server._local_only) {
+      // normalize valid entries to {value}
+      const normValid = (merged.valid || []).map(v => {
+        if (typeof v === 'string' || typeof v === 'number') return { value: String(v) };
+        return { value: String(v.value ?? v.id ?? v.raw ?? v) };
+      });
+      merged.valid = normValid;
+      // Prefer server invalid count strictly for enabling
+    }
+    if (isDm) this.dmPreview = merged; else this.groupPreview = merged;
+    this.renderPreview(elId, merged, btnId);
+  },
+
+  /** Build payload targets: keep string IDs/usernames; never Number()-coerce DM targets. */
+  targetsForSubmit(preview, { asNumber = false } = {}) {
+    const list = (preview && preview.valid) || [];
+    return list.map(v => {
+      const val = typeof v === 'string' || typeof v === 'number' ? String(v) : String(v.value ?? v);
+      if (asNumber && /^-?\d+$/.test(val)) return Number(val);
+      // DM: keep numeric ids as strings OR numbers? Task: do not coerce DM targets to Number.
+      // So always return string for DM. For groups, strings are fine (chat_ids: List).
+      return val;
+    });
   },
 };
+
 document.getElementById('btn-refresh-masssend')?.addEventListener('click', () => MassSend.refresh());
 document.getElementById('ms-acc-select')?.addEventListener('change', () => MassSend.refresh());
+document.getElementById('ms-dm-targets')?.addEventListener('input', () => MassSend.schedulePreview('dm'));
+document.getElementById('ms-group-targets')?.addEventListener('input', () => MassSend.schedulePreview('group'));
+
 document.getElementById('form-ms-dm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = MassSend.accId();
   if (!id) { toast('Выберите аккаунт', 'error'); return; }
-  const user_ids = MassSend.parseIds(e.target.user_ids.value).map(Number).filter(n => !Number.isNaN(n));
-  if (!user_ids.length) { toast('Укажите ID пользователей', 'error'); return; }
+  await MassSend.runPreview('dm');
+  const preview = MassSend.dmPreview;
+  if (!preview || preview.valid_count <= 0) { toast('Нет валидных получателей', 'error'); return; }
+  if (preview.invalid_count > 0) { toast('Исправьте невалидные цели перед запуском', 'error'); return; }
+  const user_ids = MassSend.targetsForSubmit(preview, { asNumber: false });
+  if (!confirm(`Запустить ЛС-рассылку на ${user_ids.length} получателей?\n\nЛимит/час соблюдается. Продолжить?`)) return;
   const body = {
     user_ids,
     message_template: e.target.message_template.value,
@@ -1568,12 +1903,17 @@ document.getElementById('form-ms-dm')?.addEventListener('submit', async (e) => {
     MassSend.refresh();
   } catch (err) { toast(err.message, 'error'); }
 });
+
 document.getElementById('form-ms-groups')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = MassSend.accId();
   if (!id) { toast('Выберите аккаунт', 'error'); return; }
-  const chat_ids = MassSend.parseIds(e.target.chat_ids.value);
-  if (!chat_ids.length) { toast('Укажите группы', 'error'); return; }
+  await MassSend.runPreview('group');
+  const preview = MassSend.groupPreview;
+  if (!preview || preview.valid_count <= 0) { toast('Нет валидных групп', 'error'); return; }
+  if (preview.invalid_count > 0) { toast('Исправьте невалидные цели перед запуском', 'error'); return; }
+  const chat_ids = MassSend.targetsForSubmit(preview, { asNumber: false });
+  if (!confirm(`Запустить рассылку в ${chat_ids.length} групп(ы)?\n\nЛимит/час соблюдается. Продолжить?`)) return;
   const body = {
     chat_ids,
     message_template: e.target.message_template.value,

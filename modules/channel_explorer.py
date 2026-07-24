@@ -45,54 +45,104 @@ class ChannelExplorer:
             self.db.add_log(self.account_id, level, message)
         print(message)
 
+    def _channel_username(self, peer) -> str:
+        uname = getattr(peer, "username", None) or ""
+        return str(uname).lstrip("@")
+
+    def _is_globally_excluded(self, channel: str) -> bool:
+        if not channel or not self.db:
+            return False
+        try:
+            if hasattr(self.db, "is_channel_globally_excluded"):
+                return bool(self.db.is_channel_globally_excluded(channel))
+        except Exception:
+            return False
+        return False
+
+    def _structurally_exclude(self, channel: str, reason: str = "no_linked_chat", evidence=None):
+        if not channel or not self.db:
+            return
+        try:
+            if hasattr(self.db, "exclude_channel_globally"):
+                self.db.exclude_channel_globally(
+                    channel,
+                    reason,
+                    evidence=evidence,
+                    source_module="channel_explorer",
+                )
+            if hasattr(self.db, "update_channel_comments_status"):
+                try:
+                    self.db.update_channel_comments_status(
+                        channel,
+                        has_open_comments=False,
+                        structural=True,
+                        reason=reason,
+                        evidence=evidence,
+                        source_module="channel_explorer",
+                    )
+                except TypeError:
+                    self.db.update_channel_comments_status(channel, has_open_comments=False)
+        except Exception as e:
+            self._log(f"structural exclude {channel}: {e}", "warning")
+
     async def check_channel_viability(self, peer) -> Dict:
-        """Проверяет канал на соответствие критериям (сабы, комменты)"""
+        """Проверяет канал на соответствие критериям (сабы, комменты).
+
+        Viability of comments is based on structural proof: linked_chat_id from
+        GetFullChannelRequest. Global exclusions are skipped and never re-added.
+        """
         # Проверяем подключение клиента
         if not self._is_client_connected():
             return {"ok": False, "reason": "Client disconnected"}
+
+        ch_name = self._channel_username(peer)
+        if ch_name and self._is_globally_excluded(ch_name):
+            return {"ok": False, "reason": "globally_excluded", "excluded": True}
         
         try:
             full = await self.client(GetFullChannelRequest(peer))
             subs = full.full_chat.participants_count
+            linked_chat_id = getattr(full.full_chat, "linked_chat_id", None)
+            # Structural proof: open comments <=> linked discussion exists
+            can_comment = bool(linked_chat_id)
             
             # Фильтр по сабам
             if subs < Config.SEARCH_MIN_SUBSCRIBERS:
                 return {"ok": False, "reason": f"Мало сабов ({subs})"}
 
-            # Проверка на комментарии
-            can_comment = False
+            if not can_comment and ch_name:
+                # Proven absence of linked chat — structural global exclusion
+                self._structurally_exclude(
+                    ch_name,
+                    reason="no_linked_chat",
+                    evidence={"linked_chat_id": None},
+                )
+                return {
+                    "ok": False,
+                    "reason": "no_linked_chat",
+                    "subs": subs,
+                    "can_comment": False,
+                    "title": full.chats[0].title if full.chats else ch_name,
+                }
+
             avg_views = 0
             try:
                 # Проверяем подключение перед запросом
                 if not self._is_client_connected():
                     return {"ok": False, "reason": "Client disconnected"}
                 
-                # Берем последний пост для проверки обсуждения
+                # Берем последние посты для avg views (не для can_comment)
                 msgs = await self.client.get_messages(peer, limit=20)
                 if msgs:
-                    # Считаем активность (ср. просмотры)
                     views = [m.views for m in msgs if m.views]
                     avg_views = sum(views) / len(views) if views else 0
                     
                     if avg_views < Config.SEARCH_MIN_AVG_VIEWS:
                         return {"ok": False, "reason": f"Низкие просмотры ({avg_views:.0f})"}
-                    
-                    # Проверяем возможность комментирования одного из последних постов
-                    for m in msgs[:5]:
-                        if not self._is_client_connected():
-                            return {"ok": False, "reason": "Client disconnected"}
-                        try:
-                            await self.client(GetDiscussionMessageRequest(peer=peer, msg_id=m.id))
-                            # Если исключение не вылетело, значит комменты есть
-                            can_comment = True
-                            break
-                        except Exception as e:
-                            # 'CHANNEL_PRIVATE', 'CHAT_FORBIDDEN' и т.д. означают что комментов нет или нас там нет
-                            continue
                 else:
                     avg_views = 0
             except Exception as e:
-                # Если не удалось получить сообщения, возможно канал приватный
+                # Private/access while reading posts — local failure, not global
                 return {"ok": False, "reason": f"Ошибка чтения постов ({e})"}
 
             return {
@@ -100,10 +150,11 @@ class ChannelExplorer:
                 "subs": subs, 
                 "avg_views": avg_views, 
                 "can_comment": can_comment,
+                "linked_chat_id": linked_chat_id,
                 "title": full.chats[0].title
             }
         except Exception as e:
-             # Ловим глобальные ошибки (например приватный канал)
+             # Ловим глобальные ошибки (например приватный канал) — local only
             return {"ok": False, "reason": str(e)}
 
     async def discover_from_posts(self, source_channel: str, limit: int = 50):
@@ -175,6 +226,9 @@ class ChannelExplorer:
                     break
                 
                 try:
+                    # Never re-add globally excluded channels
+                    if self._is_globally_excluded(str(link).lstrip('@')):
+                        continue
                     peer = await self.client.get_entity(link)
                     if not isinstance(peer, (types.Channel, types.Chat)): continue
                     
@@ -188,6 +242,8 @@ class ChannelExplorer:
                     if res.get('subs', 0) > 0 and res.get('subs', 0) < min_channel_subs:
                         continue
                     
+                    if res.get('excluded'):
+                        continue
                     if res.get('ok'):
                         is_new = self.db.add_found_channel(
                             channel=link.lstrip('@'),
@@ -261,6 +317,8 @@ class ChannelExplorer:
                 if not username:
                     # приватные/без username рекомендации пропускаем — их не проверить
                     continue
+                if self._is_globally_excluded(str(username).lstrip('@')):
+                    continue
 
                 try:
                     res = await self.check_channel_viability(chat)
@@ -271,6 +329,8 @@ class ChannelExplorer:
                     if res.get('subs', 0) > 0 and res.get('subs', 0) < min_channel_subs:
                         continue
 
+                    if res.get('excluded'):
+                        continue
                     if res.get('ok'):
                         is_new = self.db.add_found_channel(
                             channel=username.lstrip('@'),
@@ -304,7 +364,10 @@ class ChannelExplorer:
         
         # Берём каналы из БД
         all_channels = self.db.get_found_channels(limit=20, only_open_comments=True)
-        seeds = [ch['channel'] for ch in all_channels[:10]]
+        seeds = [
+            ch['channel'] for ch in all_channels[:10]
+            if not self._is_globally_excluded(ch.get('channel', ''))
+        ]
 
         # Приоритетные seed'ы для рекомендаций — закреплённые (замочек) каналы:
         # они наиболее релевантны тематике, поэтому их "похожие" ценнее всего.

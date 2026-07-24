@@ -2,21 +2,25 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, F
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
 import os
 import sys
 import shutil
 import io
 import base64
 import asyncio
+import threading
+import time
 
 # Добавляем корневую директорию в путь для импорта
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from utils.database import Database
 from utils.validator import InputValidator
+from utils.telegram_targets import normalize_targets, preview_targets
 from config import Config
 import logging
 
@@ -184,22 +188,184 @@ auth = AuthManager(sessions_dir=SESSIONS_DIR)
 
 # Реестр активных воркеров
 workers: Dict[int, BotWorker] = {}
+# Защита от гонок start/stop/replace одного и того же account_id
+_workers_lock = threading.RLock()
+# account_id → monotonic ts когда воркер «стартует» (ещё is_running=False)
+_workers_starting: Dict[int, float] = {}
+
+
+def _worker_is_alive(worker: Optional[BotWorker]) -> bool:
+    """True если воркер уже running или его поток ещё жив (starting/stopping)."""
+    if worker is None:
+        return False
+    try:
+        if getattr(worker, "is_running", False):
+            return True
+    except Exception:
+        pass
+    thread = getattr(worker, "thread", None)
+    try:
+        if thread is not None and thread.is_alive():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _wait_worker_stopped(worker: Optional[BotWorker], timeout: float = 20.0) -> bool:
+    """Ждёт остановки потока воркера. Координируется с BotWorker.stop()/is_running."""
+    if worker is None:
+        return True
+    deadline = time.monotonic() + max(0.5, float(timeout))
+    thread = getattr(worker, "thread", None)
+    while time.monotonic() < deadline:
+        alive_thread = False
+        try:
+            alive_thread = bool(thread and thread.is_alive())
+        except Exception:
+            alive_thread = False
+        running = False
+        try:
+            running = bool(getattr(worker, "is_running", False))
+        except Exception:
+            running = False
+        if not alive_thread and not running:
+            return True
+        time.sleep(0.1)
+    # final check
+    try:
+        if thread is not None and thread.is_alive():
+            return False
+    except Exception:
+        return False
+    return not bool(getattr(worker, "is_running", False))
 
 
 def _start_worker_for_account(account: dict) -> Optional[BotWorker]:
-    """Helper для старта воркера (используется и в автостарте, и в /start endpoint)"""
-    if account.get('ip'):
-        account['proxy'] = {
-            'ip': account['ip'],
-            'port': account['port'],
-            'proxy_user': account.get('proxy_user'),
-            'proxy_pass': account.get('proxy_pass'),
-            'proxy_type': account.get('proxy_type', 'http')
-        }
-    worker = BotWorker(account, db)
-    workers[account['id']] = worker
-    worker.start()
-    return worker
+    """
+    Helper для старта воркера (автостарт и /start).
+    Не заменяет живой/стартующий воркер и не создаёт второй session на тот же id.
+    """
+    acc_id = account['id']
+    with _workers_lock:
+        existing = workers.get(acc_id)
+        if _worker_is_alive(existing):
+            print(f"[workers] skip start acc={acc_id}: already live/starting")
+            return existing
+        # stale registry entry (stopped) — drop before replace
+        if existing is not None:
+            try:
+                if not _worker_is_alive(existing):
+                    workers.pop(acc_id, None)
+            except Exception:
+                workers.pop(acc_id, None)
+
+        if account.get('ip'):
+            account['proxy'] = {
+                'ip': account['ip'],
+                'port': account['port'],
+                'proxy_user': account.get('proxy_user'),
+                'proxy_pass': account.get('proxy_pass'),
+                'proxy_type': account.get('proxy_type', 'http')
+            }
+        _workers_starting[acc_id] = time.monotonic()
+        worker = BotWorker(account, db)
+        workers[acc_id] = worker
+        try:
+            worker.start()
+        except Exception:
+            workers.pop(acc_id, None)
+            _workers_starting.pop(acc_id, None)
+            raise
+        return worker
+
+
+def _stop_worker_for_account(acc_id: int, *, wait_timeout: float = 20.0) -> bool:
+    """
+    Останавливает воркер и ЖДЁТ завершения потока перед удалением из registry.
+    Возвращает True если воркер был (или считался) остановлен.
+    """
+    with _workers_lock:
+        worker = workers.get(acc_id)
+        if worker is None:
+            _workers_starting.pop(acc_id, None)
+            return False
+        try:
+            worker.stop()
+        except Exception as e:
+            print(f"[workers] stop() error acc={acc_id}: {e}")
+
+    # wait outside lock so stop side-effects can progress
+    stopped = _wait_worker_stopped(worker, timeout=wait_timeout)
+
+    with _workers_lock:
+        current = workers.get(acc_id)
+        # удаляем только тот же объект, чтобы не снести параллельно стартовавший новый
+        if current is worker:
+            if stopped or not _worker_is_alive(current):
+                workers.pop(acc_id, None)
+            else:
+                # поток всё ещё жив — оставляем запись, но is_running должен быть False
+                print(f"[workers] acc={acc_id}: stop wait timed out, keeping registry entry")
+        _workers_starting.pop(acc_id, None)
+    return True
+
+
+def _account_is_paused(acc_id: int) -> bool:
+    """True если аккаунт на паузе/rate-limit — mass-send/invite должны отказать."""
+    try:
+        if db.should_pause_account(acc_id):
+            return True
+        if db.get_account_pause_seconds(acc_id) > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        health = db.get_account_health(acc_id) or {}
+        if health.get("health_status") in ("paused", "rate_limited"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _clamp_limit(value: Optional[int], cap: int) -> int:
+    cap = int(cap)
+    if value is None:
+        return cap
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return cap
+    if v <= 0:
+        return cap
+    return min(v, cap)
+
+
+def _normalize_explicit_targets(
+    targets: List[Union[int, str]],
+    target_type: Optional[str] = None,
+):
+    """Нормализует явный список и отклоняет запрос целиком при любой ошибке."""
+    valid, rejected = normalize_targets(targets)
+    wrong_type = []
+    if target_type == "user":
+        wrong_type = [item for item in valid if item.kind == "chat_id"]
+    elif target_type == "group":
+        wrong_type = [item for item in valid if item.kind == "user_id"]
+    if wrong_type:
+        rejected.extend(wrong_type)
+        rejected_keys = {item.send_key for item in wrong_type}
+        valid = [item for item in valid if item.send_key not in rejected_keys]
+    if rejected:
+        details = ", ".join(
+            f"{item.original or '∅'} ({'не тот тип цели' if item in wrong_type else (item.error or item.kind)})"
+            for item in rejected[:10]
+        )
+        raise ValueError(f"исправьте невалидные цели: {details}")
+    if not valid:
+        raise ValueError("список целей пуст")
+    return valid
 
 
 # Флаг глобальной паузы (FIX: синхронизирован с worker'ом через worker_set_global_pause)
@@ -325,7 +491,18 @@ async def add_account(account: AccountCreate):
     # Санитизация имени сессии
     session_name = account.session_name or f"session_{account.phone.replace('+', '')}"
     session_name = InputValidator.sanitize_string(session_name)
-    
+
+    # Нельзя атомарно заменить .session, пока её использует активный воркер.
+    existing_account = next(
+        (a for a in db.get_accounts() if str(a.get('phone')) == str(account.phone)),
+        None,
+    )
+    if existing_account and _worker_is_alive(workers.get(existing_account['id'])):
+        raise HTTPException(
+            status_code=409,
+            detail="Сначала остановите уже запущенный аккаунт перед повторной авторизацией",
+        )
+
     try:
         # Получаем proxy_id из auth_manager (если был использован при авторизации)
         proxy_id = await auth.finish_auth(account.phone, session_name)
@@ -550,7 +727,7 @@ async def get_account_profile(acc_id: int):
             return future.result(timeout=30)
         else:
             coro.close()
-            raise HTTPException(status_code=500, detail="Не удалось получить проф��ль")
+            raise HTTPException(status_code=500, detail="Не удалось получить профиль")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1059,6 +1236,13 @@ async def cleanup_unpinned_channels(older_than_days: Optional[int] = None):
     count = db.cleanup_unpinned_channels(older_than_days=older_than_days)
     return {"deleted": count}
 
+
+@app.get("/discovery/exclusions")
+async def get_global_channel_exclusions(limit: int = 500):
+    """Постоянный общий бан-лист структурно неподходящих каналов."""
+    return db.list_global_exclusions(limit=max(1, min(int(limit), 5000)))
+
+
 @app.post("/discovery/channels/{channel}/recheck")
 async def recheck_channel(channel: str):
     """Перепроверяет канал на наличие открытых комментариев"""
@@ -1080,20 +1264,28 @@ async def recheck_channel(channel: str):
         # Проверяем есть ли linked_chat (группа обсуждений)
         has_comments = full.full_chat.linked_chat_id is not None
         
-        # Обновляем статус в базе
-        db.update_channel_comments_status(normalized, has_comments)
-        
-        # Если комменты открыты, снимаем баны для всех аккаунтов
-        if has_comments:
-            # Удаляем записи о банах для этого канала
+        # Успешный GetFullChannelRequest без linked_chat_id — структурное
+        # доказательство. Глобально исключённые записи не «оживляем» автоматически.
+        globally_excluded = db.is_channel_globally_excluded(normalized)
+        if not has_comments:
+            db.update_channel_comments_status(
+                normalized,
+                False,
+                structural=True,
+                reason="manual_recheck_no_linked_chat",
+                evidence={"linked_chat_id": None},
+                source_module="api_recheck",
+            )
+        elif not globally_excluded:
+            db.update_channel_comments_status(normalized, True)
             with db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM channel_bans WHERE channel = ?", (normalized,))
-        
+
         return {
             "channel": normalized,
-            "has_open_comments": has_comments,
-            "status": "open" if has_comments else "closed"
+            "has_open_comments": has_comments and not globally_excluded,
+            "status": "globally_excluded" if globally_excluded else ("open" if has_comments else "closed"),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1109,7 +1301,7 @@ async def recheck_all_closed_channels():
     
     # Получаем все закрытые каналы
     channels = db.get_found_channels(only_open_comments=False)
-    closed_channels = [ch for ch in channels if not ch.get('has_open_comments')]
+    closed_channels = [ch for ch in channels if not ch.get('can_comment')]
     
     results = {"checked": 0, "opened": 0, "still_closed": 0, "errors": 0}
     
@@ -1123,12 +1315,23 @@ async def recheck_all_closed_channels():
             full = await worker.client(GetFullChannelRequest(entity))
             has_comments = full.full_chat.linked_chat_id is not None
             
-            db.update_channel_comments_status(channel, has_comments)
+            globally_excluded = db.is_channel_globally_excluded(channel)
+            if not has_comments:
+                db.update_channel_comments_status(
+                    channel,
+                    False,
+                    structural=True,
+                    reason="bulk_recheck_no_linked_chat",
+                    evidence={"linked_chat_id": None},
+                    source_module="api_recheck",
+                )
+            elif not globally_excluded:
+                db.update_channel_comments_status(channel, True)
             results["checked"] += 1
-            
-            if has_comments:
+
+            if has_comments and not globally_excluded:
                 results["opened"] += 1
-                # Снимаем баны
+                # Снимаем только account-local баны; permanent exclusions не трогаем.
                 with db.get_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute("DELETE FROM channel_bans WHERE channel = ?", (channel,))
@@ -1881,11 +2084,21 @@ async def reset_closed_channels():
     try:
         with db.get_connection() as conn:
             cursor = conn.cursor()
-            # Сбрасываем статус "закрытых комментариев"
-            cursor.execute("UPDATE found_channels SET can_comment = 1 WHERE can_comment = 0")
+            # Сбрасываем только временные статусы. Permanent structural exclusions
+            # намеренно остаются заблокированными для всех текущих и будущих аккаунтов.
+            exclusion_guard = (
+                "LOWER(channel) NOT IN "
+                "(SELECT LOWER(channel) FROM channel_global_exclusions)"
+            )
+            cursor.execute(
+                f"UPDATE found_channels SET can_comment = 1 "
+                f"WHERE can_comment = 0 AND {exclusion_guard}"
+            )
             count = cursor.rowcount
-            # Также сбрасываем статус 'rejected' обратно на 'active', чтобы воркер их подхватил
-            cursor.execute("UPDATE found_channels SET status = 'active' WHERE status = 'rejected'")
+            cursor.execute(
+                f"UPDATE found_channels SET status = 'active' "
+                f"WHERE status = 'rejected' AND {exclusion_guard}"
+            )
             rejected_count = cursor.rowcount
         
         return {
@@ -1918,9 +2131,7 @@ async def reset_account_bans(account_id: int):
         return {"status": "ok", "removed": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-    print(f"[add_channel] Готово: {channel}")
-    return {"status": "added" if is_new else "updated", "channel": channel}
+
 
 @app.get("/logs")
 async def get_logs(
@@ -2209,22 +2420,30 @@ class InviteParseRequest(BaseModel):
     chat_id: str
 
 class InviteStartRequest(BaseModel):
-    channel_id: int
+    # channel may be numeric id, @username or t.me link (resolved at invite time)
+    channel_id: Union[int, str]
     source_chat_id: Optional[str] = None
-    user_ids: Optional[List[int]] = None
+    # explicit user targets only (ids / @usernames) — never auto-broaden
+    user_ids: Optional[List[Union[int, str]]] = None
     daily_limit: Optional[int] = None
 
 class MassSendDMRequest(BaseModel):
-    user_ids: List
+    # explicit string/int targets only
+    user_ids: List[Union[int, str]]
     message_template: str
     media_base64: Optional[str] = None
     hourly_limit: Optional[int] = None
 
 class MassSendGroupRequest(BaseModel):
-    chat_ids: List
+    chat_ids: List[Union[int, str]]
     message_template: str
     media_base64: Optional[str] = None
     hourly_limit: Optional[int] = None
+
+
+class TelegramTargetsPreviewRequest(BaseModel):
+    targets: List[Union[int, str]]
+    target_type: Optional[str] = None
 
 
 # === Channel Creator API ===
@@ -2378,65 +2597,109 @@ async def add_to_post_queue(acc_id: int, channel_id: int, data: PostQueueRequest
 
 @app.post("/accounts/{acc_id}/inviter/parse")
 async def parse_users(acc_id: int, data: InviteParseRequest):
-    """Парсит пользователей из чата"""
+    """Парсит пользователей только из явно указанного чата-источника."""
     if acc_id not in workers or not workers[acc_id].is_running:
         raise HTTPException(status_code=400, detail="Аккаунт не запущен")
-    
+    if _account_is_paused(acc_id):
+        raise HTTPException(status_code=429, detail="Аккаунт на паузе / rate-limit")
+
     worker = workers[acc_id]
-    
+
     try:
         async def _parse():
             return await worker.inviter.parse_users_from_chat(data.chat_id)
-        
+
         future = worker.run_task(_parse())
         if future:
-            count = future.result(timeout=60)
-            return {"status": "success", "parsed_count": count}
+            # Пагинация больших чатов может занимать больше минуты.
+            count = future.result(timeout=300)
+            return {"status": "success", "parsed_count": count, "source": data.chat_id}
         raise HTTPException(status_code=500, detail="Воркер недоступен")
     except HTTPException:
         raise
+    except FutureTimeoutError:
+        raise HTTPException(
+            status_code=202,
+            detail="Парсинг продолжается в фоне; обновите список кандидатов через несколько минут",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/accounts/{acc_id}/inviter/users")
-async def get_parsed_users_api(acc_id: int, limit: int = 100, offset: int = 0):
-    """Получает список спарсенных пользователей"""
-    return db.get_parsed_users(acc_id, limit=limit, offset=offset)
+async def get_parsed_users_api(
+    acc_id: int,
+    limit: int = 100,
+    offset: int = 0,
+    source_chat_id: Optional[int] = None,
+):
+    """Получает кандидатов; при source_chat_id — строго из этого источника."""
+    safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
+    return db.get_parsed_users(
+        acc_id,
+        limit=safe_limit,
+        offset=safe_offset,
+        source_chat_id=source_chat_id,
+    )
 
 
 @app.post("/accounts/{acc_id}/inviter/start")
 async def start_invite(acc_id: int, data: InviteStartRequest):
-    """Запускает инвайтинг"""
+    """Запускает одну ограниченную сессию инвайтинга с явной целью и пулом."""
     if acc_id not in workers or not workers[acc_id].is_running:
         raise HTTPException(status_code=400, detail="Аккаунт не запущен")
-    
+    if _account_is_paused(acc_id):
+        remaining = db.get_account_pause_seconds(acc_id)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Аккаунт на паузе / rate-limit; осталось около {remaining} сек.",
+        )
+
     worker = workers[acc_id]
-    
+    effective_limit = _clamp_limit(data.daily_limit, Config.INVITER_DAILY_LIMIT)
+
     try:
         async def _invite():
+            # Явный список имеет приоритет и никогда не расширяется из БД.
+            if data.user_ids:
+                return await worker.inviter.invite_users_to_channel(
+                    data.channel_id,
+                    data.user_ids,
+                    daily_limit=effective_limit,
+                )
             if data.source_chat_id:
                 return await worker.inviter.run_invite_session(
-                    data.channel_id, data.source_chat_id,
-                    limit=data.daily_limit or 50
+                    data.channel_id,
+                    data.source_chat_id,
+                    limit=effective_limit,
                 )
-            elif data.user_ids:
-                return await worker.inviter.invite_users_to_channel(
-                    data.channel_id, data.user_ids,
-                    daily_limit=data.daily_limit
-                )
-            else:
-                # Use already parsed users
-                users = db.get_parsed_users(acc_id, limit=data.daily_limit or 50)
-                user_ids = [u['user_id'] for u in users]
-                return await worker.inviter.invite_users_to_channel(
-                    data.channel_id, user_ids,
-                    daily_limit=data.daily_limit
-                )
-        
+
+            # Осознанный fallback: только уже спарсенные пользователи этого аккаунта.
+            users = db.get_parsed_users(acc_id, limit=effective_limit)
+            user_ids = [u['user_id'] for u in users]
+            if not user_ids:
+                return {
+                    "status": "failed",
+                    "success": 0,
+                    "errors": 0,
+                    "skipped": 0,
+                    "total": 0,
+                    "last_error": "no_candidates",
+                }
+            return await worker.inviter.invite_users_to_channel(
+                data.channel_id,
+                user_ids,
+                daily_limit=effective_limit,
+            )
+
         future = worker.run_task(_invite())
         if future:
-            return {"status": "started", "message": "Invite session started. Poll /inviter/stats for progress."}
+            return {
+                "status": "started",
+                "message": "Инвайт запущен; прогресс доступен в статистике инвайтера.",
+                "effective_daily_limit": effective_limit,
+            }
         raise HTTPException(status_code=500, detail="Воркер недоступен")
     except HTTPException:
         raise
@@ -2446,8 +2709,18 @@ async def start_invite(acc_id: int, data: InviteStartRequest):
 
 @app.get("/accounts/{acc_id}/inviter/stats")
 async def get_invite_stats_api(acc_id: int):
-    """Получает статистику инвайтинга"""
-    return db.get_invite_stats(acc_id)
+    """Получает накопительную статистику и прогресс текущей сессии."""
+    stats = db.get_invite_stats(acc_id)
+    worker = workers.get(acc_id)
+    if worker and worker.is_running and getattr(worker, "inviter", None):
+        try:
+            stats["progress"] = worker.inviter.get_progress()
+        except Exception:
+            stats["progress"] = None
+    else:
+        stats["progress"] = None
+    stats["pause_seconds"] = db.get_account_pause_seconds(acc_id)
+    return stats
 
 
 @app.get("/accounts/{acc_id}/inviter/chats")
@@ -2474,21 +2747,39 @@ async def get_available_chats(acc_id: int):
 
 # === Mass Send API ===
 
+@app.post("/telegram-targets/preview")
+async def telegram_targets_preview(data: TelegramTargetsPreviewRequest):
+    """Syntax-only preview/normalizer for explicit Telegram targets (no network)."""
+    target_type = data.target_type if data.target_type in ("user", "group") else None
+    return preview_targets(data.targets, target_type=target_type)
+
+
 @app.post("/accounts/{acc_id}/mass-send/dm")
 async def start_dm_campaign(acc_id: int, data: MassSendDMRequest):
-    """Запускает рассылку в ЛС"""
+    """Запускает рассылку в ЛС по явному списку targets."""
     if acc_id not in workers or not workers[acc_id].is_running:
         raise HTTPException(status_code=400, detail="Аккаунт не запущен")
-    
+    if _account_is_paused(acc_id):
+        raise HTTPException(status_code=429, detail="Аккаунт на паузе / rate-limit")
+
     worker = workers[acc_id]
-    
+
     try:
-        # Create campaign in DB
+        valid = _normalize_explicit_targets(data.user_ids, target_type="user")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    hourly_limit = _clamp_limit(data.hourly_limit, Config.MASS_SEND_HOURLY_LIMIT)
+    # Materialize normalized originals for the sender (ordered unique)
+    normalized_targets = [t.original for t in valid]
+
+    try:
         campaign_id = db.add_mass_send_campaign(
-            acc_id, f"DM Campaign {asyncio.get_event_loop().time():.0f}",
-            data.message_template, target_type="dm"
+            acc_id, f"DM Campaign {time.time():.0f}",
+            data.message_template, target_type="dm",
+            total_targets=min(len(normalized_targets), hourly_limit),
         )
-        
+
         media_path = None
         if data.media_base64:
             import base64 as b64
@@ -2502,16 +2793,21 @@ async def start_dm_campaign(acc_id: int, data: MassSendDMRequest):
             media_path = os.path.join(media_dir, filename)
             with open(media_path, 'wb') as f:
                 f.write(media_bytes)
-        
+
         async def _send():
             return await worker.mass_sender.run_dm_campaign(
-                campaign_id, data.user_ids, data.message_template,
-                media_path=media_path, hourly_limit=data.hourly_limit
+                campaign_id, normalized_targets, data.message_template,
+                media_path=media_path, hourly_limit=hourly_limit
             )
-        
+
         future = worker.run_task(_send())
         if future:
-            return {"status": "started", "campaign_id": campaign_id}
+            return {
+                "status": "started",
+                "campaign_id": campaign_id,
+                "targets": len(normalized_targets),
+                "hourly_limit": hourly_limit,
+            }
         raise HTTPException(status_code=500, detail="Воркер недоступен")
     except HTTPException:
         raise
@@ -2521,18 +2817,29 @@ async def start_dm_campaign(acc_id: int, data: MassSendDMRequest):
 
 @app.post("/accounts/{acc_id}/mass-send/groups")
 async def start_group_campaign(acc_id: int, data: MassSendGroupRequest):
-    """Запускает рассылку в группы"""
+    """Запускает рассылку в группы по явному списку targets."""
     if acc_id not in workers or not workers[acc_id].is_running:
         raise HTTPException(status_code=400, detail="Аккаунт не запущен")
-    
+    if _account_is_paused(acc_id):
+        raise HTTPException(status_code=429, detail="Аккаунт на паузе / rate-limit")
+
     worker = workers[acc_id]
-    
+
+    try:
+        valid = _normalize_explicit_targets(data.chat_ids, target_type="group")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    hourly_limit = _clamp_limit(data.hourly_limit, Config.MASS_SEND_HOURLY_LIMIT)
+    normalized_targets = [t.original for t in valid]
+
     try:
         campaign_id = db.add_mass_send_campaign(
-            acc_id, f"Group Campaign {asyncio.get_event_loop().time():.0f}",
-            data.message_template, target_type="group"
+            acc_id, f"Group Campaign {time.time():.0f}",
+            data.message_template, target_type="group",
+            total_targets=min(len(normalized_targets), hourly_limit),
         )
-        
+
         media_path = None
         if data.media_base64:
             import base64 as b64
@@ -2546,16 +2853,21 @@ async def start_group_campaign(acc_id: int, data: MassSendGroupRequest):
             media_path = os.path.join(media_dir, filename)
             with open(media_path, 'wb') as f:
                 f.write(media_bytes)
-        
+
         async def _send():
             return await worker.mass_sender.run_group_campaign(
-                campaign_id, data.chat_ids, data.message_template,
-                media_path=media_path, hourly_limit=data.hourly_limit
+                campaign_id, normalized_targets, data.message_template,
+                media_path=media_path, hourly_limit=hourly_limit
             )
-        
+
         future = worker.run_task(_send())
         if future:
-            return {"status": "started", "campaign_id": campaign_id}
+            return {
+                "status": "started",
+                "campaign_id": campaign_id,
+                "targets": len(normalized_targets),
+                "hourly_limit": hourly_limit,
+            }
         raise HTTPException(status_code=500, detail="Воркер недоступен")
     except HTTPException:
         raise
@@ -2571,7 +2883,7 @@ async def get_campaigns(acc_id: int):
 
 @app.get("/accounts/{acc_id}/mass-send/campaigns/{campaign_id}/stats")
 async def get_campaign_stats_api(acc_id: int, campaign_id: int):
-    """Получает статистику кампании"""
+    """Получает статистику + lifecycle кампании"""
     return db.get_campaign_stats(campaign_id)
 
 
@@ -2637,7 +2949,7 @@ async def import_and_filter_channels(file: UploadFile = File(...), criteria: str
 
     acc_id, worker = running_workers[0]
 
-    # Читае�� файл
+    # Читаем файл
     content = await file.read()
     text_content = content.decode('utf-8', errors='ignore')
 

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=7" />
+  <link rel="stylesheet" href="/static/style.css?v=8" />
 </head>
 <body>
 
@@ -273,13 +273,14 @@
     <div class="metrics-row">
       <div class="metric"><span class="metric-label">Всего</span><span class="metric-value" id="ch-total">—</span></div>
       <div class="metric"><span class="metric-label">С открытыми комментами</span><span class="metric-value" id="ch-open">—</span></div>
+      <div class="metric"><span class="metric-label">Навсегда исключено</span><span class="metric-value" id="ch-excluded">—</span></div>
       <div class="metric"><span class="metric-label">Watcher (мин)</span><span class="metric-value" id="ch-watcher-int">—</span></div>
       <div class="metric"><span class="metric-label">Watcher</span><span class="metric-value" id="ch-watcher">—</span></div>
     </div>
 
     <form id="form-add-channel" class="channel-add-bar">
       <input type="text" id="add-channel-input" placeholder="@username, ссылка t.me/… или +инвайт" />
-      <input type="text" id="add-channel-title" placeholder="Название (необяза��ельно)" />
+      <input type="text" id="add-channel-title" placeholder="Название (необязательно)" />
       <button class="btn btn-primary" type="submit">+ Добавить канал</button>
     </form>
 
@@ -446,11 +447,11 @@
     <div class="page-header">
       <h2>Инвайтер</h2>
       <div class="page-actions">
-        <select id="inv-acc-select" class="acc-select"></select>
-        <button class="btn btn-ghost" id="btn-refresh-inviter">Обновить</button>
+        <select id="inv-acc-select" class="acc-select" aria-label="Аккаунт для инвайта"></select>
+        <button class="btn btn-ghost" id="btn-refresh-inviter" type="button">Обновить</button>
       </div>
     </div>
-    <p class="muted">Парсинг участников из чата и приглашение их в ваш канал/группу. Аккаунт должен быть запущен.</p>
+    <p class="muted">Парсинг участников из чата-источника и приглашение их в ваш целевой канал/группу. Аккаунт должен быть запущен. Соблюдайте лимиты Telegram — инструмент не обходит антиспам-ограничения.</p>
 
     <div class="metrics-row">
       <div class="metric"><span class="metric-label">Спарсено</span><span class="metric-value" id="inv-parsed">—</span></div>
@@ -461,44 +462,80 @@
 
     <div class="panel-grid" style="margin-top:16px">
       <div class="panel">
-        <h3 class="section-h3">1. Спарсить участников</h3>
+        <h3 class="section-h3">1. Источник — спарсить участников</h3>
         <form id="form-parse-users">
-          <div class="form-row"><label>Чат-источник (@username или ссылка)</label>
-            <input type="text" name="chat_id" placeholder="@somechat" required /></div>
+          <div class="form-row">
+            <label for="inv-source-chat">Чат-источник</label>
+            <input type="text" id="inv-source-chat" name="chat_id" placeholder="@somechat или ссылка t.me/…" required autocomplete="off" />
+            <span class="field-hint">Откуда брать участников. Можно выбрать из списка ниже.</span>
+          </div>
+          <div class="form-row">
+            <label for="inv-chats-select">Доступные чаты аккаунта</label>
+            <select id="inv-chats-select" aria-label="Выбрать чат-источник из списка">
+              <option value="">— загрузка —</option>
+            </select>
+            <span class="field-hint">Выбор подставляет значение в поле источника.</span>
+          </div>
           <div class="page-actions">
             <button class="btn btn-primary" type="submit">Спарсить</button>
-            <span class="muted small" id="parse-status"></span>
+            <span class="muted small" id="parse-status" role="status" aria-live="polite"></span>
           </div>
         </form>
-        <div class="form-row" style="margin-top:12px">
-          <label>Доступные чаты аккаунта</label>
-          <select id="inv-chats-select"><option value="">— загрузка —</option></select>
-        </div>
       </div>
 
       <div class="panel">
-        <h3 class="section-h3">2. Пригласить в канал</h3>
+        <h3 class="section-h3">2. Цель — пригласить</h3>
         <form id="form-invite-start">
-          <div class="form-row"><label>ID вашего канала/группы</label>
-            <input type="number" name="channel_id" placeholder="-1001234567890" required /></div>
-          <div class="form-row"><label>Источник (@чат, необязательно — иначе берутся спарсенные)</label>
-            <input type="text" name="source_chat_id" placeholder="@somechat" /></div>
-          <div class="form-row"><label>Дневной лимит</label>
-            <input type="number" name="daily_limit" min="1" max="200" placeholder="50" /></div>
+          <div class="form-row">
+            <label for="inv-target-channel">Целевой канал/группа</label>
+            <input type="text" id="inv-target-channel" name="channel_id" placeholder="@mychannel или -1001234567890" required autocomplete="off" />
+            <span class="field-hint">Куда приглашать. @username или numeric id (-100…).</span>
+          </div>
+          <div class="form-row">
+            <label for="inv-source-override">Источник для сессии (необязательно)</label>
+            <input type="text" id="inv-source-override" name="source_chat_id" placeholder="пусто = уже спарсенные пользователи" autocomplete="off" />
+            <span class="field-hint">Если указать — сессия парсит/берёт из этого чата. Иначе используются спарсенные кандидаты.</span>
+          </div>
+          <div class="form-row">
+            <label for="inv-daily-limit">Дневной лимит</label>
+            <input type="number" id="inv-daily-limit" name="daily_limit" min="1" max="40" placeholder="40" />
+          </div>
           <div class="page-actions">
-            <button class="btn btn-primary" type="submit">Запустить инвайт</button>
+            <button class="btn btn-primary" type="submit" id="btn-invite-start" disabled>Запустить инвайт</button>
           </div>
         </form>
       </div>
     </div>
 
+    <div class="panel" style="margin-top:16px">
+      <div class="section-head-row">
+        <h3 class="section-h3">Спарсенные кандидаты</h3>
+        <span class="muted small" id="inv-users-count">0</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" aria-label="Спарсенные пользователи">
+          <thead>
+            <tr>
+              <th>User ID</th>
+              <th>Username</th>
+              <th>Имя</th>
+              <th>Источник</th>
+            </tr>
+          </thead>
+          <tbody id="inv-users-tbody">
+            <tr><td colspan="4" class="empty">Выберите аккаунт и спарсите участников</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <h3 class="section-h3">Авто-инвайт (в фоновом цикле воркера)</h3>
-    <p class="muted small">Когда включено, запущенный аккаунт сам парсит участников из чатов-источников и понемногу приглашает их в целевой канал каждые несколько циклов. Изменения сохраняются автоматически.</p>
+    <p class="muted small">Когда включено, запущенный аккаунт сам парсит участников из чатов-источников и понемногу приглашает их в целевой канал каждые несколько циклов. Изменения сохраняются автоматически. Не используйте для обхода ограничений Telegram.</p>
     <div class="toggle-group">
       <div class="toggle-row">
         <div class="toggle-info">
           <div class="toggle-title">Включить авто-инвайт</div>
-          <div class="toggle-desc">Фоновое приглашение участников из источников в целевой канал.</div>
+          <div class="toggle-desc">Фоновое приглашение участников из источников в целевой канал в рамках обычных лимитов.</div>
         </div>
         <label class="switch"><input type="checkbox" data-setting="auto_invite_enabled" /><span class="slider"></span></label>
       </div>
@@ -514,7 +551,7 @@
       </div>
       <div class="form-row">
         <label>Дневной лимит инвайтов</label>
-        <input type="number" data-setting="auto_invite_daily_limit" min="1" max="200" placeholder="40" />
+        <input type="number" data-setting="auto_invite_daily_limit" min="1" max="40" placeholder="40" />
       </div>
       <div class="form-row">
         <label>Интервал (каждые N циклов)</label>
@@ -525,17 +562,6 @@
       <label>Чаты-источники (по одному в строке)</label>
       <textarea data-setting="auto_invite_source_chats" rows="3" placeholder="@somechat&#10;@anotherchat"></textarea>
     </div>
-
-    <h3 class="section-h3">Проверка публикации комментариев</h3>
-    <div class="toggle-group">
-      <div class="toggle-row">
-        <div class="toggle-info">
-          <div class="toggle-title">Проверять, что комментарий опубликован</div>
-          <div class="toggle-desc">Детект теневого бана: после отправки бот проверяет, что комментарий реально виден.</div>
-        </div>
-        <label class="switch"><input type="checkbox" data-setting="verify_comment_published" /><span class="slider"></span></label>
-      </div>
-    </div>
   </section>
 
   <!-- ============================== TAB: РАССЫЛКИ ============================== -->
@@ -543,44 +569,74 @@
     <div class="page-header">
       <h2>Массовые рассылки</h2>
       <div class="page-actions">
-        <select id="ms-acc-select" class="acc-select"></select>
-        <button class="btn btn-ghost" id="btn-refresh-masssend">Обновить</button>
+        <select id="ms-acc-select" class="acc-select" aria-label="Аккаунт для рассылки"></select>
+        <button class="btn btn-ghost" id="btn-refresh-masssend" type="button">Обновить</button>
       </div>
     </div>
-    <p class="muted">Рассылка сообщений в ЛС пользователям или в группы. Используйте осторожно — риск ограничений Telegram.</p>
+    <p class="muted">Рассылка сообщений в ЛС или группы. Соблюдайте лимиты Telegram — агрессивные рассылки приводят к ограничениям. Скрапинг аудитории и обход лимитов здесь не предусмотрены.</p>
 
     <div class="panel-grid">
       <div class="panel">
         <h3 class="section-h3">Рассылка в ЛС</h3>
         <form id="form-ms-dm">
-          <div class="form-row"><label>ID пользователей (че��ез запятую или с новой строки)</label>
-            <textarea name="user_ids" rows="3" placeholder="123456789, 987654321"></textarea></div>
-          <div class="form-row"><label>Текст сообщения</label>
-            <textarea name="message_template" rows="3" placeholder="Привет! …" required></textarea></div>
-          <div class="form-grid-2">
-            <div class="form-row"><label>Лимит в час</label>
-              <input type="number" name="hourly_limit" min="1" max="100" placeholder="20" /></div>
-            <div class="form-row"><label>Медиа (необязательно)</label>
-              <input type="file" name="media" accept="image/*,video/*" /></div>
+          <div class="form-row">
+            <label for="ms-dm-targets">Получатели</label>
+            <textarea id="ms-dm-targets" name="user_ids" rows="4" placeholder="123456789&#10;@username&#10;https://t.me/username&#10;tg://user?id=123456789" aria-describedby="ms-dm-help"></textarea>
+            <span class="field-hint" id="ms-dm-help">ID, @username, t.me/… или tg://user?id=… — через запятую или с новой строки. Не преобразуются принудительно в Number.</span>
           </div>
-          <div class="page-actions"><button class="btn btn-primary" type="submit">Запустить ЛС-рассылку</button></div>
+          <div class="target-preview" id="ms-dm-preview" aria-live="polite">
+            <div class="target-preview-stats muted small">Введите получателей для проверки</div>
+            <ul class="target-preview-sample" hidden></ul>
+          </div>
+          <div class="form-row">
+            <label for="ms-dm-message">Текст сообщения</label>
+            <textarea id="ms-dm-message" name="message_template" rows="3" placeholder="Привет! …" required></textarea>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="ms-dm-hourly">Лимит в час</label>
+              <input type="number" id="ms-dm-hourly" name="hourly_limit" min="1" max="20" placeholder="20" />
+            </div>
+            <div class="form-row">
+              <label for="ms-dm-media">Медиа (необязательно)</label>
+              <input type="file" id="ms-dm-media" name="media" accept="image/*,video/*" />
+            </div>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-primary" type="submit" id="btn-ms-dm-start" disabled>Запустить ЛС-рассылку</button>
+          </div>
         </form>
       </div>
 
       <div class="panel">
         <h3 class="section-h3">Рассылка в группы</h3>
         <form id="form-ms-groups">
-          <div class="form-row"><label>ID/username групп (через запятую или с новой строки)</label>
-            <textarea name="chat_ids" rows="3" placeholder="@group1, -1001234567890"></textarea></div>
-          <div class="form-row"><label>Текст сообщения</label>
-            <textarea name="message_template" rows="3" placeholder="Текст…" required></textarea></div>
-          <div class="form-grid-2">
-            <div class="form-row"><label>Лимит в час</label>
-              <input type="number" name="hourly_limit" min="1" max="100" placeholder="10" /></div>
-            <div class="form-row"><label>Медиа (необязательно)</label>
-              <input type="file" name="media" accept="image/*,video/*" /></div>
+          <div class="form-row">
+            <label for="ms-group-targets">Группы / чаты</label>
+            <textarea id="ms-group-targets" name="chat_ids" rows="4" placeholder="@group1&#10;-1001234567890&#10;https://t.me/group1" aria-describedby="ms-group-help"></textarea>
+            <span class="field-hint" id="ms-group-help">@username, numeric id (-100…), t.me/… — через запятую или с новой строки.</span>
           </div>
-          <div class="page-actions"><button class="btn btn-primary" type="submit">Запустить рассылку в группы</button></div>
+          <div class="target-preview" id="ms-group-preview" aria-live="polite">
+            <div class="target-preview-stats muted small">Введите группы для проверки</div>
+            <ul class="target-preview-sample" hidden></ul>
+          </div>
+          <div class="form-row">
+            <label for="ms-group-message">Текст сообщения</label>
+            <textarea id="ms-group-message" name="message_template" rows="3" placeholder="Текст…" required></textarea>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="ms-group-hourly">Лимит в час</label>
+              <input type="number" id="ms-group-hourly" name="hourly_limit" min="1" max="20" placeholder="10" />
+            </div>
+            <div class="form-row">
+              <label for="ms-group-media">Медиа (необязательно)</label>
+              <input type="file" id="ms-group-media" name="media" accept="image/*,video/*" />
+            </div>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-primary" type="submit" id="btn-ms-group-start" disabled>Запустить рассылку в группы</button>
+          </div>
         </form>
       </div>
     </div>
@@ -726,36 +782,39 @@
     <div class="page-header">
       <h2>Настройки</h2>
       <div class="page-actions">
-        <button class="btn btn-ghost" id="btn-test-ai">Тест нейросети</button>
-        <button class="btn btn-primary" id="btn-save-settings">Сохранить</button>
+        <button class="btn btn-ghost" id="btn-test-ai" type="button">Тест нейросети</button>
+        <button class="btn btn-primary" id="btn-save-settings" type="button">Сохранить</button>
       </div>
     </div>
 
-        <div class="settings-grid">
-          <div class="setting-field">
-            <label>Поиск каждые N циклов</label>
-            <input type="number" data-setting="search_interval_cycles" min="1" max="100" />
-            <span class="field-hint">Чаще = больше каналов, но выше нагрузка</span>
-          </div>
-          <div class="setting-field">
-            <label>Мин. подписчиков канала</label>
-            <input type="number" data-setting="min_channel_subs" min="100" max="10000000" step="100" />
-            <span class="field-hint">Каналы меньше этого порога игнорируются</span>
-          </div>
+    <div class="settings-body">
+      <div class="form-grid-2">
+        <div class="form-row">
+          <label for="set-search-interval">Поиск каналов: каждые N циклов</label>
+          <input type="number" id="set-search-interval" data-setting="search_interval_cycles" min="1" max="200" />
+          <span class="field-hint">Чаще = больше каналов, но выше нагрузка</span>
         </div>
-        <div class="setting-field" style="margin-top:16px">
-          <label for="search-keywords">Теги и фразы для поиска каналов</label>
-          <textarea id="search-keywords" data-setting="search_keywords" rows="8" placeholder="нейросети&#10;искусственный интеллект&#10;ChatGPT&#10;AI tools"></textarea>
-          <span class="field-hint">Указывайте по одному тегу или фразе на строку. Можно вводить через запятую. Изменения применятся в следующем цикле поиска без перезапуска аккаунта.</span>
+        <div class="form-row">
+          <label for="set-min-subs">Мин. подписчиков канала</label>
+          <input type="number" id="set-min-subs" data-setting="min_channel_subs" min="0" max="10000000" step="100" />
+          <span class="field-hint">Каналы меньше этого порога игнорируются</span>
         </div>
-      <div class="form-row">
-        <label>AI модель</label>
-        <input type="text" data-setting="gemini_model" placeholder="google/gemini-3-flash-preview" />
+      </div>
+
+      <div class="form-row" style="margin-top:14px">
+        <label for="search-keywords">Теги и фразы для поиска каналов</label>
+        <textarea id="search-keywords" data-setting="search_keywords" rows="8" placeholder="нейросети&#10;искусственный интеллект&#10;ChatGPT&#10;AI tools"></textarea>
+        <span class="field-hint">По одному тегу или фразе на строку (или через запятую). Применяется в следующем цикле поиска без перезапуска аккаунта.</span>
+      </div>
+
+      <div class="form-row" style="margin-top:14px">
+        <label for="set-gemini-model">AI модель</label>
+        <input type="text" id="set-gemini-model" data-setting="gemini_model" placeholder="google/gemini-3-flash-preview" />
       </div>
 
       <div class="form-row">
-        <label>Системный промпт для комментариев</label>
-        <textarea rows="6" data-setting="comment_prompt"></textarea>
+        <label for="set-comment-prompt">Системный промпт для комментариев</label>
+        <textarea id="set-comment-prompt" rows="6" data-setting="comment_prompt"></textarea>
       </div>
 
       <h3 class="section-h3">Комментинг</h3>
@@ -774,6 +833,13 @@
           </div>
           <label class="switch"><input type="checkbox" data-setting="comment_as_channel"/><span class="slider"></span></label>
         </div>
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <div class="toggle-title">Проверять, что комментарий опубликован</div>
+            <div class="toggle-desc">Детект теневого бана: после отправки бот проверяет, что комментарий реально виден.</div>
+          </div>
+          <label class="switch"><input type="checkbox" data-setting="verify_comment_published" /><span class="slider"></span></label>
+        </div>
       </div>
 
       <div class="form-grid-2" style="margin-top:16px">
@@ -785,9 +851,6 @@
           <label>Канал для «от имени группы» (@username)</label>
           <input type="text" data-setting="comment_as_channel_username" placeholder="@my_channel" />
         </div>
-      </div>
-
-      <div class="form-grid-2">
         <div class="form-row">
           <label>Макс. возраст поста (часы)</label>
           <input type="number" min="1" max="240" data-setting="max_post_age_hours" />
@@ -797,16 +860,8 @@
           <input type="number" min="10" max="3600" data-setting="cycle_pause_seconds" />
         </div>
         <div class="form-row">
-          <label>Поиск каналов: каждые N циклов</label>
-          <input type="number" min="1" max="200" data-setting="search_interval_cycles" />
-        </div>
-        <div class="form-row">
           <label>Watcher: интервал (мин)</label>
           <input type="number" min="5" max="1440" data-setting="channel_watcher_interval_minutes" />
-        </div>
-        <div class="form-row">
-          <label>Мин. подписчиков канала</label>
-          <input type="number" min="0" data-setting="min_channel_subs" />
         </div>
         <div class="form-row">
           <label>Шанс ответить в чате (0..1)</label>
@@ -850,7 +905,7 @@
         </div>
       </div>
 
-      <div id="settings-test-result" class="form-row"></div>
+      <div id="settings-test-result" class="form-row" role="status" aria-live="polite"></div>
     </div>
   </section>
 
@@ -900,12 +955,12 @@
 </main>
 
 <!-- TOAST -->
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <!-- ADD ACCOUNT MODAL -->
 <div id="modal-add-account" class="modal hidden">
   <div class="modal-card">
-    <header><h3>Добавить аккаунты</h3><button class="modal-close">×</button></header>
+    <header><h3>Добавить аккаунты</h3><button type="button" class="modal-close" aria-label="Закрыть">×</button></header>
     <div class="modal-body">
 
       <div class="modal-switch">
@@ -987,7 +1042,7 @@
 <!-- EDIT PROFILE MODAL -->
 <div id="modal-profile" class="modal hidden">
   <div class="modal-card">
-    <header><h3>Профиль аккаунта</h3><button class="modal-close">×</button></header>
+    <header><h3>Профиль аккаунта</h3><button type="button" class="modal-close" aria-label="Закрыть">×</button></header>
     <div class="modal-body">
       <div id="profile-loading" class="muted">Загрузка профиля…</div>
       <form id="form-profile" class="hidden">
@@ -1023,6 +1078,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=8"></script>
 </body>
 </html>
