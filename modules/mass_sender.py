@@ -14,6 +14,7 @@ import asyncio
 import random
 import re
 import os
+import time
 from typing import Dict, List, Optional, Tuple, Union
 
 from telethon import TelegramClient
@@ -218,6 +219,44 @@ class MassSender:
             return False, error, seconds
         return False, error, 0
 
+    # Длительность скользящего окна лимита (1 час)
+    HOURLY_WINDOW_SECONDS = 3600
+
+    async def _throttle_hourly_window(self, sent_in_window: int, window_start: float,
+                                      hourly_limit: int) -> Tuple[int, float]:
+        """
+        Соблюдает лимит успешных отправок в скользящем часовом окне.
+
+        Вызывается ПЕРЕД каждой отправкой. Если в текущем окне уже сделано
+        >= hourly_limit успешных отправок — досыпает до конца окна (чанками по
+        30 сек, чтобы asyncio.CancelledError прилетал быстро) и сбрасывает окно.
+
+        Возвращает актуальные (sent_in_window, window_start).
+        Тестируется без Telegram; asyncio.sleep мокается.
+        """
+        if hourly_limit <= 0 or sent_in_window < hourly_limit:
+            return sent_in_window, window_start
+
+        now = time.monotonic()
+        elapsed = now - window_start
+        remaining = self.HOURLY_WINDOW_SECONDS - elapsed
+
+        if remaining > 0:
+            minutes = max(1, int(round(remaining / 60)))
+            self._log(
+                f"Лимит {hourly_limit}/час исчерпан, пауза {minutes} мин до следующего окна",
+                "info",
+            )
+            # спим чанками по 30 сек до конца окна
+            slept = 0.0
+            while slept < remaining:
+                chunk = min(30.0, remaining - slept)
+                await asyncio.sleep(chunk)
+                slept += chunk
+
+        # сброс окна
+        return 0, time.monotonic()
+
     async def run_dm_campaign(self, campaign_id: int, user_list: list, message_template: str,
                               media_path: str = None, hourly_limit: int = None) -> Dict:
         """Запускает кампанию рассылки в ЛС по явному списку целей."""
@@ -235,7 +274,6 @@ class MassSender:
                 pass
             return {'sent': 0, 'blocked': 0, 'errors': 0, 'total': 0, 'status': 'failed'}
 
-        targets = targets[:hourly_limit]
         try:
             self.db.update_mass_send_campaign(
                 campaign_id, status="running", total_targets=len(targets), processed_count=0
@@ -246,82 +284,104 @@ class MassSender:
         stats = {'sent': 0, 'blocked': 0, 'errors': 0, 'total': 0, 'status': 'running'}
         consecutive_errors = 0
         processed = 0
+        # Скользящее часовое окно лимита успешных отправок
+        window_start = time.monotonic()
+        sent_in_window = 0
 
-        for parsed in targets:
-            label = parsed.original or str(parsed.value)
-            stats['total'] += 1
-            text = self._process_spintax(message_template)
+        try:
+            for parsed in targets:
+                label = parsed.original or str(parsed.value)
+                stats['total'] += 1
+                text = self._process_spintax(message_template)
 
-            async def _do_send(p=parsed, t=text):
-                return await self.send_to_user(p, t, media_path)
-
-            success, error, _fw = await self._send_with_flood_retry(_do_send, max_flood_retries=1)
-            processed += 1
-
-            if success:
-                stats['sent'] += 1
-                consecutive_errors = 0
-                self.db.add_mass_send_result(campaign_id, self.account_id, label, 'user', 'sent')
-                self._log(f"Отправлено пользователю {label}")
-
-            elif error and ("blocked" in error or "deactivated" in error):
-                stats['blocked'] += 1
-                consecutive_errors = 0
-                self.db.add_mass_send_result(
-                    campaign_id, self.account_id, label, 'user', 'blocked', error
+                # Соблюдаем темп: не более hourly_limit успешных отправок в час
+                sent_in_window, window_start = await self._throttle_hourly_window(
+                    sent_in_window, window_start, hourly_limit
                 )
-                self._log(f"Пользователь {label} заблокирован/деактивирован", "warning")
 
-            elif error and "peer_flood" in error:
-                stats['errors'] += 1
-                self._handle_peer_flood(campaign_id, label, 'user')
-                stats['status'] = 'peer_flood'
-                try:
-                    self.db.update_mass_send_campaign(campaign_id, processed_count=processed)
-                except Exception:
-                    pass
-                return stats
+                async def _do_send(p=parsed, t=text):
+                    return await self.send_to_user(p, t, media_path)
 
-            elif error and error.startswith("flood_wait:"):
-                stats['errors'] += 1
-                consecutive_errors += 1
-                self.db.add_mass_send_result(
-                    campaign_id, self.account_id, label, 'user', 'error', error
+                success, error, _fw = await self._send_with_flood_retry(_do_send, max_flood_retries=1)
+                processed += 1
+
+                if success:
+                    stats['sent'] += 1
+                    sent_in_window += 1
+                    consecutive_errors = 0
+                    self.db.add_mass_send_result(campaign_id, self.account_id, label, 'user', 'sent')
+                    self._log(f"Отправлено пользователю {label}")
+
+                elif error and ("blocked" in error or "deactivated" in error):
+                    stats['blocked'] += 1
+                    consecutive_errors = 0
+                    self.db.add_mass_send_result(
+                        campaign_id, self.account_id, label, 'user', 'blocked', error
+                    )
+                    self._log(f"Пользователь {label} заблокирован/деактивирован", "warning")
+
+                elif error and "peer_flood" in error:
+                    stats['errors'] += 1
+                    self._handle_peer_flood(campaign_id, label, 'user')
+                    stats['status'] = 'peer_flood'
+                    try:
+                        self.db.update_mass_send_campaign(campaign_id, processed_count=processed)
+                    except Exception:
+                        pass
+                    return stats
+
+                elif error and error.startswith("flood_wait:"):
+                    stats['errors'] += 1
+                    consecutive_errors += 1
+                    self.db.add_mass_send_result(
+                        campaign_id, self.account_id, label, 'user', 'error', error
+                    )
+                else:
+                    stats['errors'] += 1
+                    consecutive_errors += 1
+                    self.db.add_mass_send_result(
+                        campaign_id, self.account_id, label, 'user', 'error', error
+                    )
+                    self._log(f"Ошибка отправки пользователю {label}: {error}", "error")
+
+                # Периодическое обновление прогресса (~каждые 10 обработанных)
+                if processed % 10 == 0:
+                    try:
+                        self.db.update_mass_send_campaign(campaign_id, processed_count=processed)
+                    except Exception:
+                        pass
+
+                if consecutive_errors >= Config.MASS_SEND_ERROR_THRESHOLD:
+                    self._log(
+                        f"Превышен порог ошибок ({consecutive_errors}), останавливаем кампанию",
+                        "error",
+                    )
+                    stats['status'] = 'error_threshold'
+                    try:
+                        self.db.update_mass_send_campaign(
+                            campaign_id,
+                            status="error_threshold",
+                            processed_count=processed,
+                            error_message=f"consecutive_errors={consecutive_errors}",
+                            finished=True,
+                        )
+                    except Exception:
+                        pass
+                    return stats
+
+                await asyncio.sleep(
+                    random.randint(Config.MASS_SEND_DELAY_MIN, Config.MASS_SEND_DELAY_MAX)
                 )
-            else:
-                stats['errors'] += 1
-                consecutive_errors += 1
-                self.db.add_mass_send_result(
-                    campaign_id, self.account_id, label, 'user', 'error', error
-                )
-                self._log(f"Ошибка отправки пользователю {label}: {error}", "error")
-
+        except asyncio.CancelledError:
+            stats['status'] = 'stopped'
             try:
-                self.db.update_mass_send_campaign(campaign_id, processed_count=processed)
+                self.db.update_mass_send_campaign(
+                    campaign_id, status="stopped", processed_count=processed, finished=True
+                )
             except Exception:
                 pass
-
-            if consecutive_errors >= Config.MASS_SEND_ERROR_THRESHOLD:
-                self._log(
-                    f"Превышен порог ошибок ({consecutive_errors}), останавливаем кампанию",
-                    "error",
-                )
-                stats['status'] = 'error_threshold'
-                try:
-                    self.db.update_mass_send_campaign(
-                        campaign_id,
-                        status="error_threshold",
-                        processed_count=processed,
-                        error_message=f"consecutive_errors={consecutive_errors}",
-                        finished=True,
-                    )
-                except Exception:
-                    pass
-                return stats
-
-            await asyncio.sleep(
-                random.randint(Config.MASS_SEND_DELAY_MIN, Config.MASS_SEND_DELAY_MAX)
-            )
+            self._log("Кампания остановлена", "warning")
+            raise
 
         stats['status'] = 'completed'
         try:
@@ -353,7 +413,6 @@ class MassSender:
                 pass
             return {'sent': 0, 'blocked': 0, 'errors': 0, 'total': 0, 'status': 'failed'}
 
-        targets = targets[:hourly_limit]
         try:
             self.db.update_mass_send_campaign(
                 campaign_id, status="running", total_targets=len(targets), processed_count=0
@@ -364,81 +423,103 @@ class MassSender:
         stats = {'sent': 0, 'blocked': 0, 'errors': 0, 'total': 0, 'status': 'running'}
         consecutive_errors = 0
         processed = 0
+        # Скользящее часовое окно лимита успешных отправок
+        window_start = time.monotonic()
+        sent_in_window = 0
 
-        for parsed in targets:
-            label = parsed.original or str(parsed.value)
-            stats['total'] += 1
-            text = self._process_spintax(message_template)
+        try:
+            for parsed in targets:
+                label = parsed.original or str(parsed.value)
+                stats['total'] += 1
+                text = self._process_spintax(message_template)
 
-            async def _do_send(p=parsed, t=text):
-                return await self.send_to_group(p, t, media_path)
-
-            success, error, _fw = await self._send_with_flood_retry(_do_send, max_flood_retries=1)
-            processed += 1
-
-            if success:
-                stats['sent'] += 1
-                consecutive_errors = 0
-                self.db.add_mass_send_result(campaign_id, self.account_id, label, 'group', 'sent')
-                self._log(f"Отправлено в группу {label}")
-
-            elif error and "peer_flood" in error:
-                stats['errors'] += 1
-                self._handle_peer_flood(campaign_id, label, 'group')
-                stats['status'] = 'peer_flood'
-                try:
-                    self.db.update_mass_send_campaign(campaign_id, processed_count=processed)
-                except Exception:
-                    pass
-                return stats
-
-            elif error and error.startswith("flood_wait:"):
-                stats['errors'] += 1
-                consecutive_errors += 1
-                self.db.add_mass_send_result(
-                    campaign_id, self.account_id, label, 'group', 'error', error
+                # Соблюдаем темп: не более hourly_limit успешных отправок в час
+                sent_in_window, window_start = await self._throttle_hourly_window(
+                    sent_in_window, window_start, hourly_limit
                 )
 
-            elif error and ("write_forbidden" in error or "channel_private" in error):
-                stats['blocked'] += 1
-                consecutive_errors = 0
-                self.db.add_mass_send_result(
-                    campaign_id, self.account_id, label, 'group', 'blocked', error
-                )
-                self._log(f"Нет доступа к группе {label}: {error}", "warning")
+                async def _do_send(p=parsed, t=text):
+                    return await self.send_to_group(p, t, media_path)
 
-            else:
-                stats['errors'] += 1
-                consecutive_errors += 1
-                self.db.add_mass_send_result(
-                    campaign_id, self.account_id, label, 'group', 'error', error
-                )
-                self._log(f"Ошибка отправки в группу {label}: {error}", "error")
+                success, error, _fw = await self._send_with_flood_retry(_do_send, max_flood_retries=1)
+                processed += 1
 
+                if success:
+                    stats['sent'] += 1
+                    sent_in_window += 1
+                    consecutive_errors = 0
+                    self.db.add_mass_send_result(campaign_id, self.account_id, label, 'group', 'sent')
+                    self._log(f"Отправлено в группу {label}")
+
+                elif error and "peer_flood" in error:
+                    stats['errors'] += 1
+                    self._handle_peer_flood(campaign_id, label, 'group')
+                    stats['status'] = 'peer_flood'
+                    try:
+                        self.db.update_mass_send_campaign(campaign_id, processed_count=processed)
+                    except Exception:
+                        pass
+                    return stats
+
+                elif error and error.startswith("flood_wait:"):
+                    stats['errors'] += 1
+                    consecutive_errors += 1
+                    self.db.add_mass_send_result(
+                        campaign_id, self.account_id, label, 'group', 'error', error
+                    )
+
+                elif error and ("write_forbidden" in error or "channel_private" in error):
+                    stats['blocked'] += 1
+                    consecutive_errors = 0
+                    self.db.add_mass_send_result(
+                        campaign_id, self.account_id, label, 'group', 'blocked', error
+                    )
+                    self._log(f"Нет доступа к группе {label}: {error}", "warning")
+
+                else:
+                    stats['errors'] += 1
+                    consecutive_errors += 1
+                    self.db.add_mass_send_result(
+                        campaign_id, self.account_id, label, 'group', 'error', error
+                    )
+                    self._log(f"Ошибка отправки в группу {label}: {error}", "error")
+
+                # Периодическое обновление прогресса (~каждые 10 обработанных)
+                if processed % 10 == 0:
+                    try:
+                        self.db.update_mass_send_campaign(campaign_id, processed_count=processed)
+                    except Exception:
+                        pass
+
+                if consecutive_errors >= Config.MASS_SEND_ERROR_THRESHOLD:
+                    self._log(
+                        f"Превышен порог ошибок ({consecutive_errors}), останавливаем кампанию",
+                        "error",
+                    )
+                    stats['status'] = 'error_threshold'
+                    try:
+                        self.db.update_mass_send_campaign(
+                            campaign_id,
+                            status="error_threshold",
+                            processed_count=processed,
+                            error_message=f"consecutive_errors={consecutive_errors}",
+                            finished=True,
+                        )
+                    except Exception:
+                        pass
+                    return stats
+
+                await asyncio.sleep(random.randint(30, 60))
+        except asyncio.CancelledError:
+            stats['status'] = 'stopped'
             try:
-                self.db.update_mass_send_campaign(campaign_id, processed_count=processed)
+                self.db.update_mass_send_campaign(
+                    campaign_id, status="stopped", processed_count=processed, finished=True
+                )
             except Exception:
                 pass
-
-            if consecutive_errors >= Config.MASS_SEND_ERROR_THRESHOLD:
-                self._log(
-                    f"Превышен порог ошибок ({consecutive_errors}), останавливаем кампанию",
-                    "error",
-                )
-                stats['status'] = 'error_threshold'
-                try:
-                    self.db.update_mass_send_campaign(
-                        campaign_id,
-                        status="error_threshold",
-                        processed_count=processed,
-                        error_message=f"consecutive_errors={consecutive_errors}",
-                        finished=True,
-                    )
-                except Exception:
-                    pass
-                return stats
-
-            await asyncio.sleep(random.randint(30, 60))
+            self._log("Кампания остановлена", "warning")
+            raise
 
         stats['status'] = 'completed'
         try:

@@ -1880,21 +1880,55 @@ document.getElementById('ms-acc-select')?.addEventListener('change', () => MassS
 document.getElementById('ms-dm-targets')?.addEventListener('input', () => MassSend.schedulePreview('dm'));
 document.getElementById('ms-group-targets')?.addEventListener('input', () => MassSend.schedulePreview('group'));
 
+document.getElementById('btn-ms-load-parsed')?.addEventListener('click', async () => {
+  const id = MassSend.accId();
+  if (!id) { toast('Выберите аккаунт', 'error'); return; }
+  try {
+    const users = await API.get(`/accounts/${id}/inviter/users?limit=1000`) || [];
+    const ta = document.getElementById('ms-dm-targets');
+    // существующие строки
+    const existing = (ta.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const seen = new Set(existing.map(s => s.toLowerCase()));
+    let added = 0;
+    users.forEach(u => {
+      const uname = (u.username || '').trim();
+      const target = uname ? ('@' + uname.replace(/^@/, '')) : (u.user_id != null ? String(u.user_id) : '');
+      if (!target) return;
+      const key = target.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      existing.push(target);
+      added++;
+    });
+    ta.value = existing.join('\n');
+    MassSend.schedulePreview('dm');
+    toast(`Добавлено спарсенных: ${added}`, 'ok');
+  } catch (err) { toast(err.message, 'error'); }
+});
+
 document.getElementById('form-ms-dm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = MassSend.accId();
   if (!id) { toast('Выберите аккаунт', 'error'); return; }
   await MassSend.runPreview('dm');
   const preview = MassSend.dmPreview;
-  if (!preview || preview.valid_count <= 0) { toast('Нет валидных получателей', 'error'); return; }
-  if (preview.invalid_count > 0) { toast('Исправьте невалидные цели перед запуском', 'error'); return; }
-  const user_ids = MassSend.targetsForSubmit(preview, { asNumber: false });
-  if (!confirm(`Запустить ЛС-рассылку на ${user_ids.length} получателей?\n\nЛимит/час соблюдается. Продолжить?`)) return;
+  const useParsed = document.getElementById('ms-dm-use-parsed')?.checked || false;
+  const parseChat = (document.getElementById('ms-dm-parse-chat')?.value || '').trim();
+  const hasParsedSource = useParsed || !!parseChat;
+  if ((!preview || preview.valid_count <= 0) && !hasParsedSource) { toast('Нет валидных получателей', 'error'); return; }
+  if (preview && preview.invalid_count > 0) { toast('Исправьте невалидные цели перед запуском', 'error'); return; }
+  const user_ids = (preview && preview.valid_count > 0) ? MassSend.targetsForSubmit(preview, { asNumber: false }) : [];
+  const confirmMsg = hasParsedSource
+    ? `Запустить ЛС-рассылку?\n\nЯвных получателей: ${user_ids.length}${parseChat ? `\nБудут спарсены участники: ${parseChat}` : ''}${useParsed ? '\n+ все спарсенные из базы' : ''}\n\nЛимит/час соблюдается. Продолжить?`
+    : `Запустить ЛС-рассылку на ${user_ids.length} получателей?\n\nЛимит/час соблюдается. Продолжить?`;
+  if (!confirm(confirmMsg)) return;
   const body = {
     user_ids,
     message_template: e.target.message_template.value,
     hourly_limit: e.target.hourly_limit.value ? +e.target.hourly_limit.value : null,
+    use_parsed: useParsed,
   };
+  if (parseChat) body.parse_from_chat = parseChat;
   const f = e.target.media.files[0];
   if (f) body.media_base64 = await fileToBase64(f);
   try {

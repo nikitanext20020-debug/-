@@ -584,6 +584,18 @@
             <textarea id="ms-dm-targets" name="user_ids" rows="4" placeholder="123456789&#10;@username&#10;https://t.me/username&#10;tg://user?id=123456789" aria-describedby="ms-dm-help"></textarea>
             <span class="field-hint" id="ms-dm-help">ID, @username, t.me/… или tg://user?id=… — через запятую или с новой строки. Не преобразуются принудительно в Number.</span>
           </div>
+          <div class="form-row">
+            <button class="btn btn-ghost" type="button" id="btn-ms-load-parsed">Загрузить спарсенных</button>
+            <span class="field-hint">Добавит в получателей пользователей, спарсенных инвайтером (не затирая введённое).</span>
+          </div>
+          <div class="form-row">
+            <label><input type="checkbox" id="ms-dm-use-parsed" /> Добавить всех спарсенных из базы инвайтера</label>
+          </div>
+          <div class="form-row">
+            <label for="ms-dm-parse-chat">Спарсить из чата перед рассылкой</label>
+            <input type="text" id="ms-dm-parse-chat" placeholder="@chat_донор или t.me/..." />
+            <span class="field-hint">Участники будут спарсены и добавлены в рассылку</span>
+          </div>
           <div class="target-preview" id="ms-dm-preview" aria-live="polite">
             <div class="target-preview-stats muted small">Введите получателей для проверки</div>
             <ul class="target-preview-sample" hidden></ul>

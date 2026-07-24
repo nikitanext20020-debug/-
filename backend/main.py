@@ -2433,6 +2433,10 @@ class MassSendDMRequest(BaseModel):
     message_template: str
     media_base64: Optional[str] = None
     hourly_limit: Optional[int] = None
+    # источники целей: добавить всех спарсенных из БД инвайтера
+    use_parsed: Optional[bool] = False
+    # спарсить участников чата-донора перед рассылкой и добавить в цели
+    parse_from_chat: Optional[str] = None
 
 class MassSendGroupRequest(BaseModel):
     chat_ids: List[Union[int, str]]
@@ -2773,11 +2777,52 @@ async def start_dm_campaign(acc_id: int, data: MassSendDMRequest):
     # Materialize normalized originals for the sender (ordered unique)
     normalized_targets = [t.original for t in valid]
 
+    # Фича A: подгрузка целей из базы спарсенных пользователей инвайтера
+    if data.parse_from_chat:
+        try:
+            async def _parse():
+                return await worker.inviter.parse_users_from_chat(data.parse_from_chat)
+            future = worker.run_task(_parse())
+            if future:
+                # НЕ future.result() — он заблокирует event loop FastAPI на весь
+                # парсинг. wrap_future ждёт completion асинхронно.
+                await asyncio.wrap_future(future)
+            else:
+                raise RuntimeError("Воркер недоступен")
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Не удалось спарсить участников чата '{data.parse_from_chat}': {e}",
+            )
+
+    if data.use_parsed or data.parse_from_chat:
+        parsed_users = db.get_parsed_users(acc_id, limit=10000)
+        for u in parsed_users:
+            username = (u.get("username") or "").strip()
+            if username:
+                normalized_targets.append("@" + username.lstrip("@"))
+            elif u.get("user_id"):
+                normalized_targets.append(u["user_id"])
+
+    # Дедупликация с сохранением порядка
+    seen = set()
+    deduped_targets = []
+    for t in normalized_targets:
+        key = str(t).lower() if isinstance(t, str) else t
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_targets.append(t)
+    normalized_targets = deduped_targets
+
+    if not normalized_targets:
+        raise HTTPException(status_code=400, detail="Нет целей для рассылки")
+
     try:
         campaign_id = db.add_mass_send_campaign(
             acc_id, f"DM Campaign {time.time():.0f}",
             data.message_template, target_type="dm",
-            total_targets=min(len(normalized_targets), hourly_limit),
+            total_targets=len(normalized_targets),
         )
 
         media_path = None
@@ -2837,7 +2882,7 @@ async def start_group_campaign(acc_id: int, data: MassSendGroupRequest):
         campaign_id = db.add_mass_send_campaign(
             acc_id, f"Group Campaign {time.time():.0f}",
             data.message_template, target_type="group",
-            total_targets=min(len(normalized_targets), hourly_limit),
+            total_targets=len(normalized_targets),
         )
 
         media_path = None

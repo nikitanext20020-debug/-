@@ -2554,9 +2554,12 @@ class Database:
 
             msk_tz = timezone(timedelta(hours=3))
             today = datetime.now(msk_tz).strftime('%Y-%m-%d')
+            # invited_at хранится в UTC (CURRENT_TIMESTAMP), поэтому сдвигаем
+            # на +3 часа к MSK перед сравнением дат — иначе с 21:00 до 00:00 UTC
+            # сегодняшние инвайты ошибочно считаются вчерашними.
             cursor.execute(
                 "SELECT COUNT(*) FROM invite_stats "
-                "WHERE account_id = ? AND status = 'success' AND DATE(invited_at) = ?",
+                "WHERE account_id = ? AND status = 'success' AND DATE(invited_at, '+3 hours') = ?",
                 (account_id, today),
             )
             today_count = cursor.fetchone()[0]
