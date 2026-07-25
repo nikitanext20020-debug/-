@@ -411,7 +411,11 @@ class PasswordVerifyRequest(BaseModel):
 
 @app.get("/accounts")
 async def get_accounts():
+    from datetime import datetime, timezone
+    
     accounts = db.get_accounts()
+    now = datetime.now(timezone.utc)
+    
     # Обогащаем данными о работе, статистикой и банами
     for acc in accounts:
         acc['is_running'] = acc['id'] in workers and workers[acc['id']].is_running
@@ -424,7 +428,101 @@ async def get_accounts():
         # Проверяем health status
         health = db.get_account_health(acc['id'])
         acc['health_status'] = health.get('health_status', 'unknown')
+        
+        # ✅ Добавляем display_name
+        acc['display_name'] = db.get_account_display_name(acc['id'])
+        
+        # ✅ Добавляем обратный отсчёт для rate_limited
+        if acc.get('rate_limited_until'):
+            try:
+                limited_until = datetime.fromisoformat(str(acc['rate_limited_until']).replace('Z', '+00:00'))
+                remaining = max(0, int((limited_until - now).total_seconds()))
+                acc['remaining_seconds'] = remaining
+            except:
+                acc['remaining_seconds'] = 0
+        else:
+            acc['remaining_seconds'] = 0
+        
+        # ✅ Добавляем count вступлений
+        acc['joined_channels_count'] = db.get_account_joined_count(acc['id'])
+    
     return accounts
+
+# ✅ НОВЫЕ ЭНДПОИНТЫ ДЛЯ 8 ФИЧ
+
+@app.get("/accounts/{account_id}/stats-full")
+async def get_account_stats_full(account_id: int):
+    """Полная статистика аккаунта (все метрики в одном месте)"""
+    try:
+        account = db.get_account(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+        
+        display_name = db.get_account_display_name(account_id)
+        
+        # Общая статистика
+        stats = db.get_stats_summary(account_id)
+        
+        # Вступления
+        joined_count = db.get_account_joined_count(account_id)
+        
+        # Забаны
+        banned_channels = db.get_banned_channels_for_account(account_id)
+        banned_count = len(banned_channels)
+        
+        # Здоровье
+        health = db.get_account_health(account_id)
+        
+        return {
+            "account_id": account_id,
+            "display_name": display_name,
+            "phone": account.get('phone'),
+            "comments": stats.get('comments_total', 0),
+            "invites": stats.get('invites_total', 0),
+            "joined_channels": joined_count,
+            "banned_count": banned_count,
+            "health_status": health.get('health_status', 'unknown'),
+            "rate_limited_until": account.get('rate_limited_until'),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/accounts/{account_id}/joined-channels")
+async def get_account_joined_channels(account_id: int):
+    """Получить список каналов, в которых вступил аккаунт"""
+    try:
+        channels = db.get_account_joined_channels(account_id)
+        count = len(channels)
+        return {
+            "account_id": account_id,
+            "count": count,
+            "channels": channels
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/discovery/chats")
+async def get_found_chats(keyword: str = None):
+    """Получить все найденные чаты/группы"""
+    try:
+        chats = db.get_found_chats(keyword=keyword, limit=500)
+        return {
+            "count": len(chats),
+            "chats": chats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/discovery/chats/clear")
+async def clear_found_chats():
+    """Очистить найденные чаты"""
+    try:
+        db.clear_found_chats()
+        return {"success": True, "message": "Найденные чаты очищены"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/send-code")
 async def send_code(req: CodeSendRequest):

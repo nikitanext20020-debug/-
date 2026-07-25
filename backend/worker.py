@@ -1848,6 +1848,15 @@ class BotWorker:
         self.log(f"📥 Вступаю в {len(channels_to_join)} новых каналов...")
         
         for channel in channels_to_join:
+            # ✅ КРИТИЧНЫЕ ПРОВЕРКИ В НАЧАЛЕ ЦИКЛА
+            if not self.is_running:
+                self.log("Воркер остановлен, прерываю цикл вступлений", "info")
+                break
+            
+            if not self.client.is_connected():
+                self.log("Клиент отключен, прерываю вступления", "warning")
+                break
+            
             try:
                 # Проверяем блокировку - может другой аккаунт уже обрабатывает
                 if self.db.is_channel_locked(self.account_id, channel):
@@ -1886,6 +1895,10 @@ class BotWorker:
                 
                 if success and not extra_info.get('pending'):
                     self.log(f"✅ {message}")
+                    
+                    # ✅ ЗАПИСЬ ВСТУПЛЕНИЯ В БД
+                    title = extra_info.get('title', channel)
+                    self.db.record_channel_join(self.account_id, channel, title, 'joined')
                     
                     # Для приватных каналов сохраняем информацию в базу
                     if channel.startswith('+') or 't.me/+' in channel:

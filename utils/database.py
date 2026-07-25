@@ -2739,3 +2739,162 @@ class Database:
                 "errors": errors,
                 **lifecycle,
             }
+
+    # ======================== НОВЫЕ МЕТОДЫ ДЛЯ 8 ФИЧ ========================
+
+    def update_account_profile(self, account_id: int, first_name: str = None, username: str = None):
+        """Обновляет профиль аккаунта (first_name, username)"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if first_name is not None:
+                cursor.execute("ALTER TABLE accounts ADD COLUMN first_name TEXT DEFAULT NULL;")
+            if username is not None:
+                cursor.execute("ALTER TABLE accounts ADD COLUMN username TEXT DEFAULT NULL;")
+            cursor.execute(
+                "UPDATE accounts SET first_name = ?, username = ? WHERE id = ?",
+                (first_name, username, account_id)
+            )
+
+    def get_account_display_name(self, account_id: int) -> str:
+        """Возвращает display name (Имя @username) или телефон"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("SELECT first_name, username, phone FROM accounts WHERE id = ?", (account_id,))
+                row = cursor.fetchone()
+                if row:
+                    first_name, username, phone = row[0], row[1], row[2]
+                    if first_name or username:
+                        name = first_name or "User"
+                        handle = f" (@{username})" if username else ""
+                        return f"{name}{handle}"
+                    return phone or "Unknown"
+            except:
+                pass
+        return "Unknown"
+
+    def record_channel_join(self, account_id: int, channel: str, title: str = None, status: str = 'joined'):
+        """Записывает вступление в канал"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # Создаём таблицу если её нет
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS account_channel_joins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    channel TEXT NOT NULL,
+                    title TEXT,
+                    status TEXT DEFAULT 'joined',
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(account_id, channel)
+                );
+            """)
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO account_channel_joins 
+                (account_id, channel, title, status, joined_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (account_id, channel, title, status)
+            )
+
+    def get_account_joined_channels(self, account_id: int, limit: int = 500) -> list:
+        """Получает каналы, в которых вступил аккаунт"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT id, channel, title, status, joined_at 
+                    FROM account_channel_joins 
+                    WHERE account_id = ?
+                    ORDER BY joined_at DESC
+                    LIMIT ?
+                    """,
+                    (account_id, limit)
+                )
+                return [dict(row) for row in cursor.fetchall()]
+            except:
+                return []
+
+    def get_account_joined_count(self, account_id: int) -> int:
+        """Количество каналов, в которых вступил аккаунт"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM account_channel_joins WHERE account_id = ? AND status = 'joined'",
+                    (account_id,)
+                )
+                return cursor.fetchone()[0]
+            except:
+                return 0
+
+    def mark_channel_expired(self, channel_link: str):
+        """Отмечает канал как истёкший"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE found_channels SET status = 'expired' WHERE link = ?",
+                    (channel_link,)
+                )
+            except:
+                pass
+
+    def get_found_chats(self, keyword: str = None, limit: int = 500) -> list:
+        """Получает найденные чаты/группы"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS found_chats (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chat INTEGER UNIQUE NOT NULL,
+                        title TEXT,
+                        members_count INTEGER DEFAULT 0,
+                        is_megagroup BOOLEAN DEFAULT 0,
+                        keyword TEXT,
+                        found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+                if keyword:
+                    cursor.execute(
+                        "SELECT chat, title, members_count, keyword, found_at FROM found_chats WHERE keyword = ? ORDER BY found_at DESC LIMIT ?",
+                        (keyword, limit)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT chat, title, members_count, keyword, found_at FROM found_chats ORDER BY found_at DESC LIMIT ?",
+                        (limit,)
+                    )
+                return [dict(row) for row in cursor.fetchall()]
+            except:
+                return []
+
+    def add_found_chat(self, chat_id: int, title: str, members_count: int = 0, keyword: str = None):
+        """Добавляет найденный чат"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO found_chats 
+                    (chat, title, members_count, keyword, found_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (chat_id, title, members_count, keyword)
+                )
+            except:
+                pass
+
+    def clear_found_chats(self):
+        """Очищает таблицу найденных чатов"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("DELETE FROM found_chats")
+            except:
+                pass
