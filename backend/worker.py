@@ -1564,13 +1564,25 @@ class BotWorker:
                     self.db.unlock_channel(name)
                     continue  # Продолжаем с другими каналами
                 
-                # Проверка на бан аккаунта
-                if "banned" in err_str or "deactivated" in err_str or "account was deleted" in err_str:
-                    self.log(f"🚫 Аккаунт забанен: {e}", "error")
+                # ✅ ПРАВИЛЬНАЯ обработка ошибок бана:
+                # UserBannedInChannelError (бан в КОНКРЕТНОМ канале) → помечаем канал, продолжаем
+                # UserDeactivatedBanError (аккаунт удален/заморожен) → стоп
+                
+                if isinstance(e, UserBannedInChannelError):
+                    # Бан в конкретном канале - НЕ стопим весь аккаунт!
+                    self.log(f"⚠️ Забанен в канале {name}, помечаю и пропускаю", "warning")
+                    self.db.mark_banned(self.account_id, name)
+                    self.db.mark_post_processed(self.account_id, name, post.id)
+                    self.db.unlock_channel(name)
+                    continue  # ✅ Продолжаем с другими каналами!
+                
+                # Глобальный бан аккаунта (удален, заморожен, деактивирован)
+                if isinstance(e, (UserDeactivatedBanError, AuthKeyUnregisteredError)) or "account was deleted" in err_str or "deactivated" in err_str:
+                    self.log(f"🚫 ГЛОБАЛЬНЫЙ БАН АККАУНТА: {e}", "error")
                     self._update_account_status("banned")
-                    self.db.unlock_channel(name)  # Разблокируем канал
+                    self.db.unlock_channel(name)
                     self.is_running = False
-                    return
+                    return  # ✅ Вот здесь ПРАВИЛЬНО стопим!
                 
                 # ChatWriteForbidden - нет прав писать (не бан аккаунта, а ограничение канала)
                 if "chatwriteforbidden" in err_str or "can't write" in err_str:
