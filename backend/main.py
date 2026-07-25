@@ -415,7 +415,7 @@ async def get_accounts():
     from datetime import datetime, timezone
     
     accounts = db.get_accounts()
-    now = datetime.now(timezone.utc)
+    now = datetime.now()  # ✅ БЕЗ timezone чтобы сравнивать с наивными датами из БД
     
     # Обогащаем данными о работе, статистикой и банами
     for acc in accounts:
@@ -437,20 +437,22 @@ async def get_accounts():
         if acc.get('rate_limited_until'):
             try:
                 rate_limited_str = str(acc['rate_limited_until'])
-                # Парсим дату - может быть как с timezone так и без
+                # Парсим дату
                 if '+' in rate_limited_str or 'Z' in rate_limited_str:
                     limited_until = datetime.fromisoformat(rate_limited_str.replace('Z', '+00:00'))
+                    # Переводим в наивную дату если now тоже наивна
+                    if limited_until.tzinfo is not None:
+                        limited_until = limited_until.replace(tzinfo=None)
                 else:
-                    # Если без timezone, добавляем UTC
-                    limited_until = datetime.fromisoformat(rate_limited_str).replace(tzinfo=timezone.utc)
+                    # Наивная дата
+                    limited_until = datetime.fromisoformat(rate_limited_str)
                 
-                # Теперь оба в UTC
                 remaining = max(0, int((limited_until - now).total_seconds()))
                 acc['remaining_seconds'] = remaining
                 if remaining > 0:
-                    print(f"[get_accounts] Account {acc['id']}: rate_limited_until={acc['rate_limited_until']}, remaining={remaining}s")
+                    print(f"[get_accounts] Account {acc['id']}: remaining={remaining}s")
             except Exception as e:
-                print(f"[get_accounts] ERROR parsing rate_limited_until for {acc['id']}: {e}")
+                print(f"[get_accounts] ERROR: {e}")
                 acc['remaining_seconds'] = 0
         else:
             acc['remaining_seconds'] = 0
@@ -553,14 +555,15 @@ async def check_rate_limit_status(account_id: int):
             from datetime import datetime, timezone
             try:
                 rate_limited_str = str(rate_limited_until)
-                # Парсим дату - может быть как с timezone так и без
+                # Парсим дату
                 if '+' in rate_limited_str or 'Z' in rate_limited_str:
                     limited_until = datetime.fromisoformat(rate_limited_str.replace('Z', '+00:00'))
+                    if limited_until.tzinfo is not None:
+                        limited_until = limited_until.replace(tzinfo=None)
                 else:
-                    # Если без timezone, добавляем UTC
-                    limited_until = datetime.fromisoformat(rate_limited_str).replace(tzinfo=timezone.utc)
+                    limited_until = datetime.fromisoformat(rate_limited_str)
                 
-                now = datetime.now(timezone.utc)
+                now = datetime.now()  # ✅ Наивная дата
                 if now < limited_until:
                     # Ещё в лимите
                     remaining = int((limited_until - now).total_seconds())
@@ -570,8 +573,7 @@ async def check_rate_limit_status(account_id: int):
                         "blocked": True
                     }
             except Exception as e:
-                print(f"[rate-limit-check] Error parsing date: {e}")
-                pass
+                print(f"[rate-limit-check] Error: {e}")
         
         # ✅ Пауза истекла! Автоматически запустить если был stopped
         if health.get('health_status') in ['paused', 'rate_limited']:
