@@ -185,12 +185,25 @@ const Accounts = {
     const stats = a.stats || {};
     const comments = stats.total_comments_sent || stats.comments_sent || 0;
     const banned = a.banned_channels_count || 0;
+    
+    // ✅ NEW: display_name, таймаут, вступления
+    const displayName = a.display_name || a.phone || '—';
+    const remainingSeconds = a.remaining_seconds || 0;
+    const joinedChannels = a.joined_channels_count || 0;
+    
+    // Форматирование таймаута
+    const timeoutChip = remainingSeconds > 0 
+      ? `<span class="badge badge-warning timeout-badge" data-remaining="${remainingSeconds}">⏸ ${this.formatTime(remainingSeconds)}</span>`
+      : '';
+    
     return `
       <div class="account-card ${a.is_running ? 'running' : ''}">
         <div class="account-card-head">
           <div>
+            <div class="account-name">${escape(displayName)}</div>
             <div class="account-phone">${escape(a.phone || '—')}</div>
             <div class="muted small">${escape(a.session_name || '')}</div>
+            ${timeoutChip}
           </div>
           <span class="account-status-dot ${escape(status)}" title="${escape(statusLabel)}"></span>
         </div>
@@ -199,6 +212,9 @@ const Accounts = {
         </div>
         <div class="account-meta">
           <span>Забанен в каналах</span><span>${banned}</span>
+        </div>
+        <div class="account-meta">
+          <span>Вступлен в каналов</span><span>${joinedChannels}</span>
         </div>
         <div class="account-meta">
           <span>Health</span><span>${escape(a.health_status || '—')}</span>
@@ -212,10 +228,23 @@ const Accounts = {
             ? `<button class="btn btn-ghost btn-sm" data-act="stop"   data-id="${a.id}">Стоп</button>`
             : `<button class="btn btn-primary btn-sm" data-act="start" data-id="${a.id}">Старт</button>`}
           <button class="btn btn-ghost btn-sm" data-act="profile" data-id="${a.id}">Профиль</button>
+          <button class="btn btn-info btn-sm" data-act="stats" data-id="${a.id}">📊 Стата</button>
+          <button class="btn btn-info btn-sm" data-act="channels" data-id="${a.id}">📥 Каналы</button>
           <button class="btn btn-ghost btn-sm" data-act="reset-bans" data-id="${a.id}">Сбросить баны</button>
           <button class="btn btn-danger btn-sm" data-act="delete"    data-id="${a.id}">Удалить</button>
         </div>
       </div>`;
+  },
+  
+  formatTime(seconds) {
+    if (seconds <= 0) return '0:00';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0) {
+      return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+    return `${m}:${String(s).padStart(2, '0')}`;
   },
   async action(act, id) {
     try {
@@ -240,10 +269,104 @@ const Accounts = {
         }
         Profile.open(id, acc);
         return;
+      } else if (act === 'stats') {
+        // ✅ NEW: Открыть модалку со статистикой
+        await this.showStats(id);
+        return;
+      } else if (act === 'channels') {
+        // ✅ NEW: Открыть модалку с каналами
+        await this.showChannels(id);
+        return;
       }
       this.refresh();
     } catch (e) {
       toast(e.message, 'error');
+    }
+  },
+  
+  async showStats(id) {
+    try {
+      const stats = await API.get(`/accounts/${id}/stats-full`);
+      const html = `
+        <div class="modal-overlay" id="modal-stats-overlay">
+          <div class="modal" id="modal-stats">
+            <div class="modal-header">
+              <h3>📊 Статистика: ${escape(stats.display_name)}</h3>
+              <button class="modal-close" onclick="document.getElementById('modal-stats-overlay').remove()">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="stats-grid">
+                <div class="stat-card">
+                  <div class="stat-label">💬 Комментарии</div>
+                  <div class="stat-value">${stats.comments || 0}</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-label">📨 Инвайты</div>
+                  <div class="stat-value">${stats.invites || 0}</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-label">📥 Вступления</div>
+                  <div class="stat-value">${stats.joined_channels || 0}</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-label">🚫 Забаны</div>
+                  <div class="stat-value">${stats.banned_count || 0}</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-label">❤️ Статус</div>
+                  <div class="stat-value">${escape(stats.health_status || 'unknown')}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.insertAdjacentHTML('beforeend', html);
+    } catch (e) {
+      toast('Ошибка: ' + e.message, 'error');
+    }
+  },
+  
+  async showChannels(id) {
+    try {
+      const data = await API.get(`/accounts/${id}/joined-channels`);
+      const channels = data.channels || [];
+      const html = `
+        <div class="modal-overlay" id="modal-channels-overlay">
+          <div class="modal" id="modal-channels">
+            <div class="modal-header">
+              <h3>📥 Каналы (${channels.length})</h3>
+              <button class="modal-close" onclick="document.getElementById('modal-channels-overlay').remove()">×</button>
+            </div>
+            <div class="modal-body">
+              ${channels.length === 0 
+                ? '<p class="muted">Нет вступлений</p>' 
+                : `<table class="channels-table">
+                    <thead>
+                      <tr>
+                        <th>Канал</th>
+                        <th>Название</th>
+                        <th>Дата</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${channels.map(ch => `
+                        <tr>
+                          <td><code>${escape(ch.channel)}</code></td>
+                          <td>${escape(ch.title || '—')}</td>
+                          <td>${ch.joined_at ? new Date(ch.joined_at).toLocaleDateString('ru-RU') : '—'}</td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>`
+              }
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.insertAdjacentHTML('beforeend', html);
+    } catch (e) {
+      toast('Ошибка: ' + e.message, 'error');
     }
   },
 };
@@ -1962,6 +2085,55 @@ document.getElementById('form-ms-groups')?.addEventListener('submit', async (e) 
   } catch (err) { toast(err.message, 'error'); }
 });
 
+// ✅ NEW: Парсер групп для рассылок
+document.getElementById('btn-parser-search')?.addEventListener('click', async () => {
+  const keywords = (document.getElementById('parser-keywords')?.value || '').trim().split(',').map(k => k.trim()).filter(Boolean);
+  if (!keywords.length) { toast('Введите ключевые слова', 'error'); return; }
+  const status = document.getElementById('parser-status');
+  status.textContent = '🔍 Поиск запущен... результаты обновятся в течение нескольких минут';
+  try {
+    await API.post(`/discovery/chats/search`, { keywords });
+    toast('✅ Поиск запущен в фоне', 'ok');
+  } catch (err) {
+    status.textContent = '❌ Ошибка: ' + err.message;
+    toast(err.message, 'error');
+  }
+});
+
+document.getElementById('btn-parser-load')?.addEventListener('click', async () => {
+  try {
+    const data = await API.get(`/discovery/chats`);
+    const chats = data.chats || [];
+    if (!chats.length) { toast('Спарсенные группы не найдены', 'info'); return; }
+    
+    const textarea = document.getElementById('ms-group-targets');
+    const existing = (textarea.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const seen = new Set(existing.map(s => s.toLowerCase()));
+    
+    let added = 0;
+    chats.forEach(ch => {
+      const chatId = `-${ch.chat}`;
+      const key = chatId.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      existing.push(chatId);
+      added++;
+    });
+    
+    textarea.value = existing.join('\n');
+    MassSend.schedulePreview('group');
+    toast(`Загружено групп: ${added}`, 'ok');
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+document.getElementById('btn-parser-clear')?.addEventListener('click', async () => {
+  if (!confirm('Очистить кэш найденных групп?')) return;
+  try {
+    await API.post(`/discovery/chats/clear`);
+    toast('✅ Кэш очищен', 'ok');
+  } catch (err) { toast(err.message, 'error'); }
+});
+
 // ============ OWN CHANNELS ============
 const OwnChannels = {
   data: [],
@@ -2078,11 +2250,35 @@ document.getElementById('form-generate-post')?.addEventListener('submit', async 
 });
 
 // ============ BOOT ============
+
+// ✅ NEW: Обновление таймаутов каждую секунду
+function updateTimeoutBadges() {
+  document.querySelectorAll('.timeout-badge').forEach(badge => {
+    let remaining = parseInt(badge.dataset.remaining) || 0;
+    if (remaining > 0) {
+      remaining--;
+      badge.dataset.remaining = remaining;
+      const h = Math.floor(remaining / 3600);
+      const m = Math.floor((remaining % 3600) / 60);
+      const s = remaining % 60;
+      let time = '';
+      if (h > 0) {
+        time = `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      } else {
+        time = `${m}:${String(s).padStart(2, '0')}`;
+      }
+      badge.textContent = `⏸ ${time}`;
+      if (remaining <= 0) badge.remove();
+    }
+  });
+}
+
 async function boot() {
   await Settings.load();
   await Accounts.refresh();
   await refreshStatus();
   setInterval(refreshStatus, 5000);
+  setInterval(updateTimeoutBadges, 1000); // ✅ NEW: обновление таймаутов
   setInterval(() => {
     if (document.querySelector('.tab-pane.active').id === 'tab-accounts') Accounts.refresh();
   }, 10000);

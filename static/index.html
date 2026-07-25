@@ -621,6 +621,28 @@
       </div>
 
       <div class="panel">
+        <h3 class="section-h3">✅ Парсер групп</h3>
+        <div class="form-row">
+          <label for="parser-keywords">Ключевые слова для поиска</label>
+          <input type="text" id="parser-keywords" placeholder="python, telegram, marketing (через запятую)" />
+          <span class="field-hint">Будет выполнен глобальный поиск групп/чатов по этим словам</span>
+        </div>
+        <div class="form-row">
+          <button class="btn btn-ghost" type="button" id="btn-parser-search">🔍 Запустить поиск</button>
+          <span class="field-hint">Поиск будет выполняться в фоне, результаты обновятся автоматически</span>
+        </div>
+        <hr style="margin: 12px 0; border: none; border-top: 1px solid var(--line);" />
+        <div class="form-row">
+          <button class="btn btn-ghost" type="button" id="btn-parser-load">📥 Загрузить спарсенные группы</button>
+          <span class="field-hint">Добавит найденные группы в поле выше для рассылки</span>
+        </div>
+        <div class="form-row">
+          <button class="btn btn-danger btn-sm" type="button" id="btn-parser-clear">🗑️ Очистить кэш</button>
+        </div>
+        <div id="parser-status" class="muted small" style="margin-top: 8px;"></div>
+      </div>
+
+      <div class="panel">
         <h3 class="section-h3">Рассылка в группы</h3>
         <form id="form-ms-groups">
           <div class="form-row">
