@@ -52,14 +52,26 @@ class SessionFileLock:
             return self
 
         os.makedirs(os.path.dirname(self.lock_file) or ".", exist_ok=True)
-        self._fh = open(self.lock_file, "a+b")
-
+        
         deadline = None
         if timeout is not None:
             deadline = time.monotonic() + max(0.0, float(timeout))
 
+        attempt = 0
         while True:
+            attempt += 1
             try:
+                # ✅ Закрываем старый файловый дескриптор перед новой попыткой
+                if self._fh:
+                    try:
+                        self._fh.close()
+                    except:
+                        pass
+                    self._fh = None
+                
+                # Открываем заново
+                self._fh = open(self.lock_file, "a+b")
+                
                 self._lock_fd(self._fh.fileno(), blocking=False)
                 self._acquired = True
                 try:
@@ -71,9 +83,10 @@ class SessionFileLock:
                 except Exception:
                     pass
                 return self
-            except (BlockingIOError, OSError, SessionLockError):
+            except (BlockingIOError, OSError, SessionLockError) as e:
+                self._close_fh()
+                
                 if timeout == 0 or (deadline is not None and time.monotonic() >= deadline):
-                    self._close_fh()
                     raise SessionLockError(
                         f"Session file already in use: {self.session_file}"
                     )
@@ -88,7 +101,10 @@ class SessionFileLock:
                         raise SessionLockError(
                             f"Failed to lock session file {self.session_file}: {e}"
                         ) from e
-                time.sleep(poll_interval)
+                
+                # На Windows иногда нужна большая задержка
+                wait_time = min(poll_interval * (attempt ** 0.5), 1.0)
+                time.sleep(wait_time)
 
     def release(self) -> None:
         """Release the lock if held. Safe to call multiple times."""
@@ -171,9 +187,14 @@ class SessionFileLock:
     def _lock_win(fd: int, blocking: bool = False) -> None:
         import msvcrt
 
-        # Lock one byte at the start of the lock file.
-        # msvcrt.locking works on the current file position.
-        os.lseek(fd, 0, os.SEEK_SET)
+        # ✅ Lock one byte at the start of the lock file
+        # msvcrt.locking works on the current file position
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+        except (OSError, ValueError):
+            # Если уже закрыт, ошибка
+            raise BlockingIOError("File descriptor is invalid")
+        
         mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
         try:
             # Ensure the file has at least 1 byte to lock
@@ -182,8 +203,12 @@ class SessionFileLock:
             except Exception:
                 size = 0
             if size < 1:
-                os.write(fd, b"\0")
-                os.lseek(fd, 0, os.SEEK_SET)
+                try:
+                    os.write(fd, b"\0")
+                    os.lseek(fd, 0, os.SEEK_SET)
+                except (OSError, ValueError):
+                    pass
+            
             msvcrt.locking(fd, mode, 1)
         except OSError as e:
             raise BlockingIOError from e
@@ -193,7 +218,14 @@ class SessionFileLock:
         import msvcrt
 
         try:
-            os.lseek(fd, 0, os.SEEK_SET)
+            # ✅ Проверяем что дескриптор еще живой
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+            except (OSError, ValueError):
+                # Дескриптор уже закрыт, ничего не делаем
+                return
+            
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         except OSError:
+            # Молча игнорируем ошибки разблокировки
             pass

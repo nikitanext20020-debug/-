@@ -631,11 +631,25 @@ class BotWorker:
             session_path = os.path.join(sessions_dir, self.session_name)
             # Exclusive OS lock BEFORE opening TelegramClient (cross-process safe)
             self._session_lock = SessionFileLock(session_path)
-            try:
-                self._session_lock.acquire(timeout=0)
-            except SessionLockError as lock_err:
-                self.log(f"🔒 Сессия уже используется другим процессом/потоком: {lock_err}", "error")
-                raise
+            
+            # ✅ Retry механизм для блокировки сессии (особенно на Windows)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Ждём до 5 секунд чтобы получить блокировку
+                    self._session_lock.acquire(timeout=5 if attempt < max_retries - 1 else 0)
+                    self.log(f"✅ Сессия заблокирована (попытка {attempt + 1})")
+                    break
+                except SessionLockError as lock_err:
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt  # 1, 2, 4 сек
+                        self.log(f"⚠️ Сессия занята, жду {wait_time}с перед повтором ({attempt + 1}/{max_retries})", "warning")
+                        import asyncio
+                        self.loop.run_until_complete(asyncio.sleep(wait_time))
+                    else:
+                        self.log(f"🔒 Не удалось получить блокировку сессии после {max_retries} попыток: {lock_err}", "error")
+                        raise
+            
             self.client = TelegramClient(session_path, self.api_id, self.api_hash, proxy=proxy)
             
             # Подключаемся (проверяем, возвращается ли корутина)
@@ -3083,10 +3097,14 @@ class BotWorker:
                 except Exception as e:
                     self.log(f"⚠️ Ошибка при остановке: {e}", "warning")
         finally:
-            # SessionFileLock освобождается только в _init_and_run.finally после
-            # фактического завершения потока и закрытия TelegramClient. Иначе при
-            # timeout shutdown другой процесс смог бы открыть ещё занятую SQLite-сессию.
-            pass
+            # ✅ Явно освобождаем блокировку при stop() чтобы другие воркеры могли запуститься
+            # Полное освобождение происходит в _init_and_run.finally при завершении потока
+            try:
+                if hasattr(self, '_session_lock') and self._session_lock is not None:
+                    self._session_lock.release()
+                    self.log("✅ Session lock освобожден", "info")
+            except Exception as e:
+                self.log(f"⚠️ Ошибка при освобождении session lock: {e}", "warning")
 
         self.log("🛑 Воркер остановлен")
 
