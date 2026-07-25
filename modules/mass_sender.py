@@ -109,8 +109,8 @@ class MassSender:
             if not isinstance(entity, User):
                 return (False, "wrong_target_type:not_user")
 
-            await self.client.action(entity, 'typing')
-            await asyncio.sleep(random.uniform(2, 5))
+            async with self.client.action(entity, 'typing'):
+                await asyncio.sleep(random.uniform(2, 5))
 
             if media_path and os.path.exists(media_path):
                 await self.client.send_file(entity, media_path, caption=text)
