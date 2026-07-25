@@ -14,6 +14,7 @@ import base64
 import asyncio
 import threading
 import time
+import uuid
 
 # Добавляем корневую директорию в путь для импорта
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -712,6 +713,14 @@ async def add_account(account: AccountCreate):
     # Санитизация имени сессии
     session_name = account.session_name or f"session_{account.phone.replace('+', '')}"
     session_name = InputValidator.sanitize_string(session_name)
+    
+    # ✅ Проверяем дубликаты session_name и добавляем UUID если нужно
+    existing_accounts_list = db.get_accounts()
+    existing_sessions = {acc.get('session_name') for acc in existing_accounts_list if acc.get('session_name')}
+    
+    if session_name in existing_sessions:
+        session_name = f"{session_name}_{uuid.uuid4().hex[:8]}"
+        print(f"⚠️ session_name уже существует, используем: {session_name}")
 
     # Нельзя атомарно заменить .session, пока её использует активный воркер.
     existing_account = next(
@@ -812,6 +821,16 @@ async def import_session(
     # Формируем имя сессии
     clean_phone = str(phone).replace('+', '').replace(' ', '')
     session_name = f"session_{clean_phone}"
+    
+    # ✅ Проверяем дубликаты session_name и добавляем timestamp если нужно
+    existing_accounts = db.get_accounts()
+    existing_sessions = {acc.get('session_name') for acc in existing_accounts if acc.get('session_name')}
+    
+    if session_name in existing_sessions:
+        # Если уже существует сессия с таким именем, добавляем UUID
+        session_name = f"{session_name}_{uuid.uuid4().hex[:8]}"
+        print(f"⚠️ session_name {clean_phone} уже существует, используем: {session_name}")
+    
     sessions_dir = SESSIONS_DIR
     session_path = os.path.join(sessions_dir, f"{session_name}.session")
     
@@ -880,6 +899,15 @@ async def import_sessions_bulk(
                 phone = phone_digits
             
             session_name = f"session_{phone.replace('+', '').replace(' ', '')}"
+            
+            # ✅ Проверяем дубликаты session_name и добавляем UUID если нужно
+            existing_accounts = db.get_accounts()
+            existing_sessions = {acc.get('session_name') for acc in existing_accounts if acc.get('session_name')}
+            
+            if session_name in existing_sessions:
+                session_name = f"{session_name}_{uuid.uuid4().hex[:8]}"
+                print(f"⚠️ session_name {phone} уже существует, используем: {session_name}")
+            
             session_path = os.path.join(sessions_dir, f"{session_name}.session")
             
             # Проверяем не существует ли уже
