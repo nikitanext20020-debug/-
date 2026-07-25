@@ -1009,6 +1009,17 @@ class Database:
             """)
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_account(self, account_id: int) -> Dict:
+        """Получить один аккаунт по ID"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM accounts WHERE id = ?", (account_id,))
+            row = cursor.fetchone()
+            if row:
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, row))
+            return None
+
     def assign_proxy_to_account(self, account_id: int, proxy_id: Optional[int]):
         """Привязывает или отвязывает прокси от аккаунта"""
         with self.get_connection() as conn:
@@ -2749,6 +2760,15 @@ class Database:
             cursor.execute(
                 "UPDATE accounts SET first_name = ?, username = ? WHERE id = ?",
                 (first_name, username, account_id)
+            )
+    
+    def set_owned_channel(self, account_id: int, channel: str):
+        """Установить личный канал для аккаунта"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE accounts SET owned_channel = ? WHERE id = ?",
+                (channel if channel else None, account_id)
             )
 
     def get_account_display_name(self, account_id: int) -> str:

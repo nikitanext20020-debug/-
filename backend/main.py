@@ -594,6 +594,59 @@ async def get_rate_limit_history(account_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ✅ NEW: Получить имена аккаунтов из Telegram для running аккаунтов
+@app.post("/accounts/sync-profiles")
+async def sync_account_profiles():
+    """Синхронизировать профили running аккаунтов с Telegram"""
+    try:
+        synced = []
+        for account_id, worker in workers.items():
+            if not worker.is_running:
+                continue
+            
+            try:
+                # Попытаемся получить профиль
+                me = await worker.client.get_me()
+                first_name = me.first_name or ""
+                username = me.username or ""
+                
+                if first_name or username:
+                    db.update_account_profile(account_id, first_name, username)
+                    synced.append({
+                        "account_id": account_id,
+                        "name": first_name,
+                        "username": username
+                    })
+            except Exception as e:
+                pass
+        
+        return {
+            "synced": len(synced),
+            "accounts": synced
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/accounts/{account_id}/set-owned-channel")
+async def set_owned_channel(account_id: int, data: dict):
+    """Установить личный канал для аккаунта"""
+    try:
+        channel = data.get('channel', '').strip()
+        
+        account = db.get_account(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+        
+        db.set_owned_channel(account_id, channel)
+        
+        return {
+            "success": True,
+            "account_id": account_id,
+            "owned_channel": channel if channel else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/auth/send-code")
 async def send_code(req: CodeSendRequest):
     # Валидация телефона
@@ -879,6 +932,10 @@ async def get_account_profile(acc_id: int):
             full_user = await worker.client(GetFullUserRequest(me))
             bio = full_user.full_user.about or ""
             
+            # ✅ Получаем owned_channel из БД
+            account = db.get_account(acc_id)
+            owned_channel = account.get('owned_channel', '') if account else ""
+            
             return {
                 "id": me.id,
                 "first_name": me.first_name or "",
@@ -886,7 +943,8 @@ async def get_account_profile(acc_id: int):
                 "username": me.username or "",
                 "phone": me.phone or "",
                 "bio": bio,
-                "avatar": avatar_base64
+                "avatar": avatar_base64,
+                "owned_channel": owned_channel or ""
             }
         
         coro = get_profile()

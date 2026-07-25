@@ -139,6 +139,13 @@ const Accounts = {
   async refresh() {
     const grid = document.getElementById('accounts-grid');
     try {
+      // ✅ Сначала синхронизируем профили из Telegram (для running аккаунтов)
+      try {
+        await API.post('/accounts/sync-profiles');
+      } catch (e) {
+        // Молча игнорируем ошибку - это не критично
+      }
+      
       this.data = await API.get('/accounts');
     } catch (e) {
       grid.innerHTML = `<div class="empty">Ошибка: ${escape(e.message)}</div>`;
@@ -471,6 +478,7 @@ const Profile = {
       this.form.last_name.value = p.last_name || '';
       this.form.username.value = p.username || '';
       this.form.bio.value = p.bio || '';
+      this.form.owned_channel.value = p.owned_channel || '';
       if (p.phone) document.getElementById('profile-phone').textContent = '+' + String(p.phone).replace(/^\+/, '');
       this.setAvatar(p.avatar, p.first_name || p.username || '?');
       this.form.classList.remove('hidden');
@@ -509,8 +517,16 @@ const Profile = {
     btn.disabled = true;
     btn.textContent = 'Сохранение…';
     try {
+      // ✅ Сохраняем данные в Telegram (профиль)
       await API.put(`/accounts/${this.id}/profile`, payload);
-      toast('Профиль обновлён в Telegram', 'ok');
+      
+      // ✅ Сохраняем owned_channel в БД
+      const ownedChannel = this.form.owned_channel.value.trim();
+      if (ownedChannel) {
+        await API.post(`/accounts/${this.id}/set-owned-channel`, {channel: ownedChannel});
+      }
+      
+      toast('Профиль обновлён', 'ok');
       this.close();
     } catch (err) {
       toast(err.message, 'error');
