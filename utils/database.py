@@ -2746,10 +2746,6 @@ class Database:
         """Обновляет профиль аккаунта (first_name, username)"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            if first_name is not None:
-                cursor.execute("ALTER TABLE accounts ADD COLUMN first_name TEXT DEFAULT NULL;")
-            if username is not None:
-                cursor.execute("ALTER TABLE accounts ADD COLUMN username TEXT DEFAULT NULL;")
             cursor.execute(
                 "UPDATE accounts SET first_name = ?, username = ? WHERE id = ?",
                 (first_name, username, account_id)

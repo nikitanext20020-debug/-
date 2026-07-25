@@ -802,6 +802,17 @@ class BotWorker:
         self.log("🚀 Синхронизация ваших подписок и каналов...")
         await self._sync_user_subscriptions()
         
+        # ✅ NEW: Сохраняем имя аккаунта из Телеграма
+        try:
+            me = await self.client.get_me()
+            first_name = me.first_name or ""
+            username = me.username or ""
+            if first_name or username:
+                self.db.update_account_profile(self.account_id, first_name, username)
+                self.log(f"✅ Профиль: {first_name} (@{username})", "info")
+        except Exception as e:
+            self.log(f"⚠️ Не удалось получить профиль: {e}", "warning")
+        
         while not self._should_stop():
             try:
                 # Per-cycle account pause from DB (PeerFlood hard pause etc.)
