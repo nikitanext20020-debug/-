@@ -109,6 +109,17 @@ class MassSender:
             if not isinstance(entity, User):
                 return (False, "wrong_target_type:not_user")
 
+            # Защита от отправки самому себе (Избранное / Saved Messages)
+            if getattr(entity, 'is_self', False) or getattr(entity, 'id', None) == 777000:
+                return (False, "cannot_send_to_self")
+
+            try:
+                me = await self.client.get_me()
+                if me and getattr(entity, 'id', None) == me.id:
+                    return (False, "cannot_send_to_self")
+            except Exception:
+                pass
+
             async with self.client.action(entity, 'typing'):
                 await asyncio.sleep(random.uniform(2, 5))
 

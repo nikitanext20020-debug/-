@@ -2,9 +2,19 @@
 Асинхронный HTTP клиент с retry-логикой и exponential backoff
 """
 import asyncio
+import ssl
 import aiohttp
+import certifi
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """Создаёт SSL-контекст с сертификатами certifi.
+    Нужно для macOS, где Python не использует системные сертификаты автоматически.
+    На Windows поведение аналогично стандартному.
+    """
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 @dataclass
@@ -35,9 +45,10 @@ class AsyncHTTPClient:
         self.base_delay = base_delay
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: Optional[aiohttp.ClientSession] = None
+        self._ssl_context = _make_ssl_context()
     
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Получает или создаёт сессию"""
+        """Получает или создаёт сессию (без connector — ssl передаём портъюмонно)"""
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(timeout=self.timeout)
         return self._session
@@ -79,6 +90,7 @@ class AsyncHTTPClient:
                     headers=headers,
                     json=json_data,
                     data=data,
+                    ssl=self._ssl_context,  # SSL через запрос, не через connector
                     **kwargs
                 ) as response:
                     # Пытаемся получить JSON, если не получается - текст

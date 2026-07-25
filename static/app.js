@@ -187,8 +187,9 @@ const Accounts = {
     }
   },
   renderCard(a) {
-    const status = a.is_running ? 'running' : (a.status || 'stopped');
-    const statusLabel = a.is_running ? 'running' : (a.status || 'stopped');
+    const isCriticalStatus = ['banned', 'deactivated', 'frozen', 'spamblock'].includes(a.status);
+    const status = isCriticalStatus ? a.status : (a.is_running ? 'running' : (a.status || 'stopped'));
+    const statusLabel = a.status ? a.status : (a.is_running ? 'running' : 'stopped');
     const stats = a.stats || {};
     const comments = stats.total_comments_sent || stats.comments_sent || 0;
     const banned = a.banned_channels_count || 0;
@@ -205,6 +206,10 @@ const Accounts = {
       console.log(`[Account ${a.id}] rate_limited_until=${a.rate_limited_until}, remaining=${remainingSeconds}s`);
     }
     
+    const statusBadge = isCriticalStatus
+      ? `<span class="pill bad" style="margin-left: 6px;">${escape(a.status)}</span>`
+      : '';
+    
     // Форматирование таймаута
     const timeoutChip = remainingSeconds > 0 
       ? `<span class="badge badge-warning timeout-badge" data-remaining="${remainingSeconds}">⏸ ${this.formatTime(remainingSeconds)}</span>`
@@ -214,7 +219,7 @@ const Accounts = {
       <div class="account-card ${a.is_running ? 'running' : ''}">
         <div class="account-card-head">
           <div>
-            <div class="account-name">${escape(displayName)}</div>
+            <div class="account-name">${escape(displayName)} ${statusBadge}</div>
             <div class="account-phone">${escape(a.phone || '—')}</div>
             <div class="muted small">${escape(a.session_name || '')}</div>
             ${timeoutChip}
@@ -761,15 +766,24 @@ const Channels = {
       (c.channel || '').toLowerCase().includes(q) ||
       (c.title || '').toLowerCase().includes(q));
     if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="empty">Ничего не найдено</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="empty">Ничего не найдено</td></tr>`;
       return;
     }
-    tbody.innerHTML = rows.slice(0, 500).map(c => `
+    tbody.innerHTML = rows.slice(0, 500).map(c => {
+      const bans = c.banned_accounts || [];
+      const bansHtml = bans.length === 0
+        ? '<span class="muted small">—</span>'
+        : bans.map(b => {
+            const label = b.phone ? b.phone.slice(-4) : `#${b.account_id}`;
+            return `<span class="pill bad" title="Забанен: ${escape(b.phone || String(b.account_id))}">🚫 …${escape(label)}</span>`;
+          }).join(' ');
+      return `
       <tr>
         <td><a href="https://t.me/${escape((c.channel || '').replace(/^\+/,'+'))}" target="_blank" rel="noopener">@${escape(c.channel || '')}</a></td>
         <td>${escape((c.title || '').slice(0, 60))}</td>
         <td class="muted">${(c.subs_count || 0).toLocaleString('ru-RU')}</td>
         <td>${c.can_comment ? '<span class="pill good">открыты</span>' : '<span class="pill bad">закрыты</span>'}</td>
+        <td>${bansHtml}</td>
         <td class="muted small">${escape(c.source || '—')}</td>
         <td class="muted small">${escape((c.last_checked || '').slice(0, 16))}</td>
         <td>
@@ -778,8 +792,8 @@ const Channels = {
           <button type="button" class="btn btn-ghost btn-sm" data-comment="${escape(c.channel)}" title="Комментить сейчас" aria-label="Комментировать сейчас">✎</button>
           <button type="button" class="btn btn-ghost btn-sm" data-del="${escape(c.channel)}" title="Удалить" aria-label="Удалить канал">×</button>
         </td>
-      </tr>
-    `).join('');
+      </tr>`;
+    }).join('');
     tbody.querySelectorAll('[data-pin]').forEach(b => {
       b.addEventListener('click', async () => {
         const channel = b.dataset.pin;
@@ -873,8 +887,12 @@ document.getElementById('form-add-channel').addEventListener('submit', async (e)
   const channel = (input.value || '').trim();
   if (!channel) { toast('Укажите канал', 'error'); return; }
   try {
-    await API.post('/discovery/channels/add', { channel, title: (titleEl.value || '').trim() });
-    toast('Канал добавлен', 'ok');
+    const result = await API.post('/discovery/channels/add', { channel, title: (titleEl.value || '').trim() });
+    if (result && result.is_new === false) {
+      toast(`@${result.channel || channel} уже есть в базе`, 'warn');
+    } else {
+      toast('Канал добавлен', 'ok');
+    }
     input.value = ''; titleEl.value = '';
     Channels.refresh();
   } catch (err) { toast(err.message, 'error'); }

@@ -264,7 +264,7 @@ class ChannelHealthWatcher:
         try:
             entity = await client.get_entity(name)
         except (UsernameInvalidError, UsernameNotOccupiedError):
-            self.db.delete_found_channel(name, force=False)
+            self.db.delete_found_channel(name, force=True)
             return {"action": "deleted", "reason": "не существует"}
         except ChannelPrivateError:
             # Private/access errors remain NON-global (account/local only)
@@ -279,7 +279,7 @@ class ChannelHealthWatcher:
         except ValueError as e:
             # Cannot find any entity — канал недоступен этому аккаунту
             if "cannot find any entity" in str(e).lower():
-                self.db.delete_found_channel(name, force=False)
+                self.db.delete_found_channel(name, force=True)
                 return {"action": "deleted", "reason": "не найден"}
             return {"action": "no_change", "reason": str(e)[:60]}
         except Exception as e:
@@ -287,7 +287,7 @@ class ChannelHealthWatcher:
 
         # Проверяем что это канал (не пользователь и не группа)
         if not getattr(entity, "broadcast", False) and not getattr(entity, "megagroup", False):
-            self.db.delete_found_channel(name, force=False)
+            self.db.delete_found_channel(name, force=True)
             return {"action": "deleted", "reason": "не канал"}
 
         # Берём full info чтобы узнать subs_count + linked_chat_id (комменты)

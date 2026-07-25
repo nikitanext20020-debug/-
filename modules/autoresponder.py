@@ -291,6 +291,21 @@ class AutoResponder:
         if not sender or not isinstance(sender, User): 
             return
         
+        # Игнорируем себя (Избранное / Saved Messages)
+        if getattr(sender, 'is_self', False):
+            return
+            
+        # Игнорируем служебные аккаунты Telegram (например 777000)
+        if getattr(sender, 'id', None) == 777000:
+            return
+            
+        try:
+            me = await self.client.get_me()
+            if me and sender.id == me.id:
+                return
+        except Exception:
+            pass
+
         # ФИЛЬТРАЦИЯ БОТОВ
         if sender.bot:
             return
