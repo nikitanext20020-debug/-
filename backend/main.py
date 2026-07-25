@@ -2418,10 +2418,13 @@ async def reset_closed_channels():
 async def reset_account_bans(account_id: int):
     """
     Удаляет записи о банах для конкретного аккаунта.
-    Полезно для новых аккаунтов, чтобы они не пропускали каналы,
-    в которых был забанен старый аккаунт.
+    Сбрасывает rate limit, здоровье, ошибки.
     """
     try:
+        account = db.get_account(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Аккаунт не найден")
+        
         with db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM channel_bans WHERE account_id = ?", (account_id,))
@@ -2431,9 +2434,31 @@ async def reset_account_bans(account_id: int):
                 "UPDATE accounts SET consecutive_errors = 0, health_status = 'healthy', rate_limited_until = NULL WHERE id = ?", 
                 (account_id,)
             )
+            conn.commit()
         
-        return {"status": "ok", "removed": count, "message": "✅ Баны удалены, rate limit сброшен"}
+        # ✅ Если воркер запущен, перезапускаем его используя правильные функции
+        if account_id in workers and workers[account_id].is_running:
+            print(f"[reset-bans] Перезапускаю воркер {account_id}...")
+            # Останавливаем используя правильную функцию
+            _stop_worker_for_account(account_id, wait_timeout=5.0)
+            # Даём время на завершение
+            await asyncio.sleep(1)
+            # Запускаем используя правильную функцию
+            updated_account = db.get_account(account_id)
+            _start_worker_for_account(updated_account)
+            return {
+                "status": "ok",
+                "removed": count,
+                "message": "✅ Баны удалены, rate limit сброшен, воркер перезагружен"
+            }
+        
+        return {
+            "status": "ok",
+            "removed": count,
+            "message": "✅ Баны удалены, rate limit сброшен"
+        }
     except Exception as e:
+        print(f"[reset-bans] ERROR: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
