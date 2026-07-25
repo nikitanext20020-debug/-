@@ -606,18 +606,30 @@ async def sync_account_profiles():
                 continue
             
             try:
-                # Попытаемся получить профиль
-                me = await worker.client.get_me()
-                first_name = me.first_name or ""
-                username = me.username or ""
+                # ✅ Запускаем async функцию в loop воркера
+                async def get_profile():
+                    try:
+                        me = await worker.client.get_me()
+                        first_name = me.first_name or ""
+                        username = me.username or ""
+                        
+                        if first_name or username:
+                            db.update_account_profile(account_id, first_name, username)
+                            return {
+                                "account_id": account_id,
+                                "name": first_name,
+                                "username": username
+                            }
+                    except Exception as e:
+                        print(f"[sync-profiles] Ошибка для {account_id}: {e}")
+                    return None
                 
-                if first_name or username:
-                    db.update_account_profile(account_id, first_name, username)
-                    synced.append({
-                        "account_id": account_id,
-                        "name": first_name,
-                        "username": username
-                    })
+                # Запускаем в loop воркера
+                if hasattr(worker, 'loop') and worker.loop and worker.loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(get_profile(), worker.loop)
+                    result = future.result(timeout=5)
+                    if result:
+                        synced.append(result)
             except Exception as e:
                 pass
         

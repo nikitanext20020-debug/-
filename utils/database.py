@@ -2761,6 +2761,7 @@ class Database:
                 "UPDATE accounts SET first_name = ?, username = ? WHERE id = ?",
                 (first_name, username, account_id)
             )
+            conn.commit()  # ✅ COMMIT!
     
     def set_owned_channel(self, account_id: int, channel: str):
         """Установить личный канал для аккаунта"""
@@ -2770,6 +2771,7 @@ class Database:
                 "UPDATE accounts SET owned_channel = ? WHERE id = ?",
                 (channel if channel else None, account_id)
             )
+            conn.commit()  # ✅ COMMIT!
 
     def get_account_display_name(self, account_id: int) -> str:
         """Возвращает display name (Имя @username) или телефон"""
