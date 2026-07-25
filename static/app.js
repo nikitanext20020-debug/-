@@ -200,6 +200,11 @@ const Accounts = {
     const remainingSeconds = a.remaining_seconds || 0;
     const joinedChannels = a.joined_channels_count || 0;
     
+    // DEBUG: логируем rate_limited_until
+    if (a.rate_limited_until) {
+      console.log(`[Account ${a.id}] rate_limited_until=${a.rate_limited_until}, remaining=${remainingSeconds}s`);
+    }
+    
     // Форматирование таймаута
     const timeoutChip = remainingSeconds > 0 
       ? `<span class="badge badge-warning timeout-badge" data-remaining="${remainingSeconds}">⏸ ${this.formatTime(remainingSeconds)}</span>`

@@ -439,7 +439,10 @@ async def get_accounts():
                 limited_until = datetime.fromisoformat(str(acc['rate_limited_until']).replace('Z', '+00:00'))
                 remaining = max(0, int((limited_until - now).total_seconds()))
                 acc['remaining_seconds'] = remaining
-            except:
+                if remaining > 0:
+                    print(f"[get_accounts] Account {acc['id']}: rate_limited_until={acc['rate_limited_until']}, remaining={remaining}s")
+            except Exception as e:
+                print(f"[get_accounts] ERROR parsing rate_limited_until for {acc['id']}: {e}")
                 acc['remaining_seconds'] = 0
         else:
             acc['remaining_seconds'] = 0
@@ -601,7 +604,11 @@ async def sync_account_profiles():
     """Синхронизировать профили running аккаунтов с Telegram"""
     try:
         synced = []
+        print(f"[sync-profiles] Начало синхронизации, workers: {list(workers.keys())}")
+        
         for account_id, worker in workers.items():
+            print(f"[sync-profiles] Проверка аккаунта {account_id}, is_running={worker.is_running}")
+            
             if not worker.is_running:
                 continue
             
@@ -613,8 +620,11 @@ async def sync_account_profiles():
                         first_name = me.first_name or ""
                         username = me.username or ""
                         
+                        print(f"[sync-profiles] Account {account_id}: first_name='{first_name}', username='{username}'")
+                        
                         if first_name or username:
                             db.update_account_profile(account_id, first_name, username)
+                            print(f"[sync-profiles] ✅ Обновлён профиль для аккаунта {account_id}")
                             return {
                                 "account_id": account_id,
                                 "name": first_name,
@@ -622,6 +632,8 @@ async def sync_account_profiles():
                             }
                     except Exception as e:
                         print(f"[sync-profiles] Ошибка для {account_id}: {e}")
+                        import traceback
+                        traceback.print_exc()
                     return None
                 
                 # Запускаем в loop воркера
@@ -630,14 +642,22 @@ async def sync_account_profiles():
                     result = future.result(timeout=5)
                     if result:
                         synced.append(result)
+                else:
+                    print(f"[sync-profiles] Loop воркера {account_id} не запущен")
             except Exception as e:
-                pass
+                print(f"[sync-profiles] Exception для {account_id}: {e}")
+                import traceback
+                traceback.print_exc()
         
+        print(f"[sync-profiles] ✅ Синхронизация завершена, synced={len(synced)}")
         return {
             "synced": len(synced),
             "accounts": synced
         }
     except Exception as e:
+        print(f"[sync-profiles] FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/accounts/{account_id}/set-owned-channel")
