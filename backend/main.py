@@ -436,7 +436,15 @@ async def get_accounts():
         # ✅ Добавляем обратный отсчёт для rate_limited
         if acc.get('rate_limited_until'):
             try:
-                limited_until = datetime.fromisoformat(str(acc['rate_limited_until']).replace('Z', '+00:00'))
+                rate_limited_str = str(acc['rate_limited_until'])
+                # Парсим дату - может быть как с timezone так и без
+                if '+' in rate_limited_str or 'Z' in rate_limited_str:
+                    limited_until = datetime.fromisoformat(rate_limited_str.replace('Z', '+00:00'))
+                else:
+                    # Если без timezone, добавляем UTC
+                    limited_until = datetime.fromisoformat(rate_limited_str).replace(tzinfo=timezone.utc)
+                
+                # Теперь оба в UTC
                 remaining = max(0, int((limited_until - now).total_seconds()))
                 acc['remaining_seconds'] = remaining
                 if remaining > 0:
@@ -544,7 +552,14 @@ async def check_rate_limit_status(account_id: int):
         if rate_limited_until:
             from datetime import datetime, timezone
             try:
-                limited_until = datetime.fromisoformat(str(rate_limited_until).replace('Z', '+00:00'))
+                rate_limited_str = str(rate_limited_until)
+                # Парсим дату - может быть как с timezone так и без
+                if '+' in rate_limited_str or 'Z' in rate_limited_str:
+                    limited_until = datetime.fromisoformat(rate_limited_str.replace('Z', '+00:00'))
+                else:
+                    # Если без timezone, добавляем UTC
+                    limited_until = datetime.fromisoformat(rate_limited_str).replace(tzinfo=timezone.utc)
+                
                 now = datetime.now(timezone.utc)
                 if now < limited_until:
                     # Ещё в лимите
@@ -554,7 +569,8 @@ async def check_rate_limit_status(account_id: int):
                         "remaining_seconds": remaining,
                         "blocked": True
                     }
-            except:
+            except Exception as e:
+                print(f"[rate-limit-check] Error parsing date: {e}")
                 pass
         
         # ✅ Пауза истекла! Автоматически запустить если был stopped
