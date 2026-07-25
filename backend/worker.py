@@ -644,7 +644,6 @@ class BotWorker:
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt  # 1, 2, 4 сек
                         self.log(f"⚠️ Сессия занята, жду {wait_time}с перед повтором ({attempt + 1}/{max_retries})", "warning")
-                        import asyncio
                         self.loop.run_until_complete(asyncio.sleep(wait_time))
                     else:
                         self.log(f"🔒 Не удалось получить блокировку сессии после {max_retries} попыток: {lock_err}", "error")
