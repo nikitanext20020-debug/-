@@ -1398,3 +1398,23 @@ button:disabled,
   border-color: var(--accent);
 }
 
+/* ✅ Улучшение layout кнопок на карточке */
+.account-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.action-row .btn {
+  flex: 1;
+  min-width: 80px;
+  font-size: 11px;
+  padding: 6px 8px;
+}
+

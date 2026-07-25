@@ -186,8 +186,10 @@ const Accounts = {
     const comments = stats.total_comments_sent || stats.comments_sent || 0;
     const banned = a.banned_channels_count || 0;
     
-    // ✅ NEW: display_name, таймаут, вступления
-    const displayName = a.display_name || a.phone || '—';
+    // ✅ display_name с fallback на session_name или phone
+    const displayName = (a.display_name && a.display_name !== 'Unknown') 
+      ? a.display_name 
+      : (a.session_name || a.phone || '—');
     const remainingSeconds = a.remaining_seconds || 0;
     const joinedChannels = a.joined_channels_count || 0;
     
@@ -224,15 +226,19 @@ const Accounts = {
           <select data-proxy-for="${a.id}">${this.proxyOptions(a.proxy_id)}</select>
         </div>
         <div class="account-actions">
-          ${a.is_running
-            ? `<button class="btn btn-ghost btn-sm" data-act="stop"   data-id="${a.id}">Стоп</button>`
-            : `<button class="btn btn-primary btn-sm" data-act="start" data-id="${a.id}">Старт</button>`}
-          <button class="btn btn-ghost btn-sm" data-act="profile" data-id="${a.id}">Профиль</button>
-          <button class="btn btn-info btn-sm" data-act="stats" data-id="${a.id}">📊 Стата</button>
-          <button class="btn btn-info btn-sm" data-act="channels" data-id="${a.id}">📥 Каналы</button>
-          <button class="btn btn-warning btn-sm" data-act="rate-history" data-id="${a.id}">⏱️ Лимиты</button>
-          <button class="btn btn-ghost btn-sm" data-act="reset-bans" data-id="${a.id}">Сбросить баны</button>
-          <button class="btn btn-danger btn-sm" data-act="delete"    data-id="${a.id}">Удалить</button>
+          <div class="action-row">
+            ${a.is_running
+              ? `<button class="btn btn-ghost btn-sm" data-act="stop"   data-id="${a.id}">Стоп</button>`
+              : `<button class="btn btn-primary btn-sm" data-act="start" data-id="${a.id}">Старт</button>`}
+            <button class="btn btn-ghost btn-sm" data-act="profile" data-id="${a.id}">Профиль</button>
+            <button class="btn btn-ghost btn-sm" data-act="reset-bans" data-id="${a.id}">Сбросить</button>
+            <button class="btn btn-danger btn-sm" data-act="delete"    data-id="${a.id}">Удалить</button>
+          </div>
+          <div class="action-row">
+            <button class="btn btn-info btn-sm" data-act="stats" data-id="${a.id}">📊 Стата</button>
+            <button class="btn btn-info btn-sm" data-act="channels" data-id="${a.id}">📥 Каналы (${joinedChannels})</button>
+            <button class="btn btn-warning btn-sm" data-act="rate-history" data-id="${a.id}">⏱️ Лимиты</button>
+          </div>
         </div>
       </div>`;
   },
