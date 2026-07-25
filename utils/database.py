@@ -2898,3 +2898,97 @@ class Database:
                 cursor.execute("DELETE FROM found_chats")
             except:
                 pass
+
+    # ======================== SMART RATE LIMIT MANAGEMENT ========================
+
+    def record_rate_limit_event(self, account_id: int, action: str = None, duration_seconds: int = None):
+        """Записывает событие rate limit в историю"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                # Создаём таблицу если её нет
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS rate_limit_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account_id INTEGER NOT NULL,
+                        action TEXT,
+                        duration_seconds INTEGER,
+                        triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        resolved_at TIMESTAMP,
+                        FOREIGN KEY(account_id) REFERENCES accounts(id)
+                    );
+                """)
+                cursor.execute(
+                    """
+                    INSERT INTO rate_limit_history 
+                    (account_id, action, duration_seconds, triggered_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (account_id, action, duration_seconds)
+                )
+            except:
+                pass
+
+    def get_rate_limit_history(self, account_id: int, limit: int = 50) -> list:
+        """Получает историю rate limit'ов для аккаунта"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT id, action, duration_seconds, triggered_at, resolved_at 
+                    FROM rate_limit_history 
+                    WHERE account_id = ?
+                    ORDER BY triggered_at DESC
+                    LIMIT ?
+                    """,
+                    (account_id, limit)
+                )
+                return [dict(row) for row in cursor.fetchall()]
+            except:
+                return []
+
+    def get_rate_limit_stats(self, account_id: int) -> dict:
+        """Получает статистику rate limit'ов"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                # Всего лимитов
+                cursor.execute(
+                    "SELECT COUNT(*) as cnt FROM rate_limit_history WHERE account_id = ?",
+                    (account_id,)
+                )
+                total = cursor.fetchone()['cnt'] if cursor.fetchone() else 0
+                
+                # Последний лимит
+                cursor.execute(
+                    """
+                    SELECT action, duration_seconds, triggered_at 
+                    FROM rate_limit_history 
+                    WHERE account_id = ?
+                    ORDER BY triggered_at DESC
+                    LIMIT 1
+                    """,
+                    (account_id,)
+                )
+                last = dict(cursor.fetchone()) if cursor.fetchone() else None
+                
+                # По действиям
+                cursor.execute(
+                    """
+                    SELECT action, COUNT(*) as cnt 
+                    FROM rate_limit_history 
+                    WHERE account_id = ?
+                    GROUP BY action
+                    """,
+                    (account_id,)
+                )
+                by_action = {row['action']: row['cnt'] for row in cursor.fetchall()}
+                
+                return {
+                    "total_limits": total,
+                    "last_limit": last,
+                    "by_action": by_action
+                }
+            except:
+                return {"total_limits": 0, "last_limit": None, "by_action": {}}

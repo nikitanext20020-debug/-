@@ -524,6 +524,76 @@ async def clear_found_chats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ✅ NEW: Smart rate limit management
+@app.get("/accounts/{account_id}/rate-limit-check")
+async def check_rate_limit_status(account_id: int):
+    """Smart check: проверить может ли аккаунт работать, если да - запустить"""
+    try:
+        account = db.get_account(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+        
+        health = db.get_account_health(account_id)
+        rate_limited_until = account.get('rate_limited_until')
+        
+        # Проверяем истекла ли пауза
+        if rate_limited_until:
+            from datetime import datetime, timezone
+            try:
+                limited_until = datetime.fromisoformat(str(rate_limited_until).replace('Z', '+00:00'))
+                now = datetime.now(timezone.utc)
+                if now < limited_until:
+                    # Ещё в лимите
+                    remaining = int((limited_until - now).total_seconds())
+                    return {
+                        "status": "rate_limited",
+                        "remaining_seconds": remaining,
+                        "blocked": True
+                    }
+            except:
+                pass
+        
+        # ✅ Пауза истекла! Автоматически запустить если был stopped
+        if health.get('health_status') in ['paused', 'rate_limited']:
+            if account_id not in workers:
+                # Создать новый воркер и запустить
+                try:
+                    await API.post(f'/accounts/{account_id}/start')
+                except:
+                    pass
+            elif not workers[account_id].is_running:
+                # Перезапустить существующий
+                try:
+                    workers[account_id].start()
+                except:
+                    pass
+        
+        return {
+            "status": "ready",
+            "remaining_seconds": 0,
+            "blocked": False,
+            "auto_restarted": True
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/accounts/{account_id}/rate-limit-history")
+async def get_rate_limit_history(account_id: int):
+    """Получить историю rate limit'ов с анализом"""
+    try:
+        history = db.get_rate_limit_history(account_id)
+        stats = db.get_rate_limit_stats(account_id)
+        
+        return {
+            "account_id": account_id,
+            "history": history,
+            "stats": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/auth/send-code")
 async def send_code(req: CodeSendRequest):
     # Валидация телефона

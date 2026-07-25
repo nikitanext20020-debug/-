@@ -230,6 +230,7 @@ const Accounts = {
           <button class="btn btn-ghost btn-sm" data-act="profile" data-id="${a.id}">Профиль</button>
           <button class="btn btn-info btn-sm" data-act="stats" data-id="${a.id}">📊 Стата</button>
           <button class="btn btn-info btn-sm" data-act="channels" data-id="${a.id}">📥 Каналы</button>
+          <button class="btn btn-warning btn-sm" data-act="rate-history" data-id="${a.id}">⏱️ Лимиты</button>
           <button class="btn btn-ghost btn-sm" data-act="reset-bans" data-id="${a.id}">Сбросить баны</button>
           <button class="btn btn-danger btn-sm" data-act="delete"    data-id="${a.id}">Удалить</button>
         </div>
@@ -276,6 +277,10 @@ const Accounts = {
       } else if (act === 'channels') {
         // ✅ NEW: Открыть модалку с каналами
         await this.showChannels(id);
+        return;
+      } else if (act === 'rate-history') {
+        // ✅ NEW: Открыть модалку с историей rate limit'ов
+        await this.showRateLimitHistory(id);
         return;
       }
       this.refresh();
@@ -355,6 +360,66 @@ const Accounts = {
                           <td><code>${escape(ch.channel)}</code></td>
                           <td>${escape(ch.title || '—')}</td>
                           <td>${ch.joined_at ? new Date(ch.joined_at).toLocaleDateString('ru-RU') : '—'}</td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>`
+              }
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.insertAdjacentHTML('beforeend', html);
+    } catch (e) {
+      toast('Ошибка: ' + e.message, 'error');
+    }
+  },
+  
+  async showRateLimitHistory(id) {
+    try {
+      const data = await API.get(`/accounts/${id}/rate-limit-history`);
+      const history = data.history || [];
+      const stats = data.stats || {};
+      
+      const html = `
+        <div class="modal-overlay" id="modal-rate-history-overlay">
+          <div class="modal" id="modal-rate-history">
+            <div class="modal-header">
+              <h3>⏱️ История rate limit'ов</h3>
+              <button class="modal-close" onclick="document.getElementById('modal-rate-history-overlay').remove()">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="stats-grid">
+                <div class="stat-card">
+                  <div class="stat-label">📊 Всего лимитов</div>
+                  <div class="stat-value">${stats.total_limits || 0}</div>
+                </div>
+                ${Object.entries(stats.by_action || {}).map(([action, count]) => `
+                  <div class="stat-card">
+                    <div class="stat-label">${action || '—'}</div>
+                    <div class="stat-value">${count}</div>
+                  </div>
+                `).join('')}
+              </div>
+              
+              <hr style="margin: 16px 0; border: none; border-top: 1px solid var(--line);" />
+              
+              ${history.length === 0 
+                ? '<p class="muted">Нет событий rate limit</p>' 
+                : `<table class="channels-table">
+                    <thead>
+                      <tr>
+                        <th>Дата</th>
+                        <th>Действие</th>
+                        <th>Длительность</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${history.map(h => `
+                        <tr>
+                          <td>${h.triggered_at ? new Date(h.triggered_at).toLocaleString('ru-RU') : '—'}</td>
+                          <td>${escape(h.action || '—')}</td>
+                          <td>${h.duration_seconds ? (h.duration_seconds / 3600).toFixed(1) + 'ч' : '—'}</td>
                         </tr>
                       `).join('')}
                     </tbody>
@@ -2273,12 +2338,39 @@ function updateTimeoutBadges() {
   });
 }
 
+// ✅ NEW: Smart check для rate limit'ов (каждые 60 сек)
+async function smartRateLimitCheck() {
+  try {
+    const accounts = document.querySelectorAll('[data-account-id]');
+    for (const el of accounts) {
+      const accountId = el.dataset.accountId;
+      if (!accountId) continue;
+      
+      try {
+        const result = await API.get(`/accounts/${accountId}/rate-limit-check`);
+        
+        // Если был разблокирован - обновить список
+        if (result.status === 'ready' && result.auto_restarted) {
+          // Нежно обновить карточку после перезагрузки
+          setTimeout(() => Accounts.refresh(), 2000);
+        }
+      } catch (e) {
+        // Ошибка проверки - не кричим, просто пропускаем
+      }
+    }
+  } catch (e) {
+    // Silent fail
+  }
+}
+
+
 async function boot() {
   await Settings.load();
   await Accounts.refresh();
   await refreshStatus();
   setInterval(refreshStatus, 5000);
-  setInterval(updateTimeoutBadges, 1000); // ✅ NEW: обновление таймаутов
+  setInterval(updateTimeoutBadges, 1000); // ✅ обновление таймаутов
+  setInterval(smartRateLimitCheck, 60000); // ✅ NEW: проверка rate limit каждые 60 сек
   setInterval(() => {
     if (document.querySelector('.tab-pane.active').id === 'tab-accounts') Accounts.refresh();
   }, 10000);
