@@ -9,8 +9,9 @@ SpamBotChecker — взаимодействие с официальным @SpamB
 Этот модуль:
 1. Открывает диалог с @SpamBot и отправляет /start.
 2. Парсит ответ (RU/EN), определяет статус.
-3. При наличии inline-кнопки «Just to be safe...» / «It's a mistake» — нажимает
-   её (это часто снимает мягкий блок).
+3. По умолчанию не нажимает inline-кнопки: ответы и апелляции в @SpamBot
+   требуют отдельного явного подтверждения. Старый режим доступен только через
+   явный параметр press_buttons=True.
 4. Возвращает структурированный результат: status, message, will_unblock_at.
 
 Используется воркером в обработчике PeerFloodError, если включён тоггл
@@ -129,11 +130,13 @@ class SpamBotChecker:
         except Exception:
             return None
 
-    async def check(self, press_buttons: bool = True, wait_seconds: float = 3.0) -> SpamBotResult:
+    async def check(self, press_buttons: bool = False, wait_seconds: float = 3.0) -> SpamBotResult:
         """
         Отправляет /start в @SpamBot, дожидается ответа, парсит.
 
-        :param press_buttons: жать ли кнопки «Просто на всякий случай / Это ошибка»
+        :param press_buttons: жать ли кнопки «Просто на всякий случай / Это ошибка».
+            По умолчанию False: автоматическая проверка статуса не должна
+            самостоятельно отправлять ответы или апелляции.
         :param wait_seconds: сколько ждать ответ от бота
         """
         try:
@@ -170,7 +173,8 @@ class SpamBotChecker:
         status = self._parse_status(text)
         unblock_at = self._parse_unblock_time(text) if status in ("limited", "blocked") else None
 
-        # Жмём первую попавшуюся кнопку, если бот предлагает её для снятия блока.
+        # Кнопки нажимаются только при явном opt-in. По умолчанию метод лишь
+        # проверяет и возвращает статус, не отправляя ответы от имени аккаунта.
         pressed = False
         if press_buttons and bot_msg.reply_markup:
             try:
