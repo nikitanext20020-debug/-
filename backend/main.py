@@ -2426,13 +2426,13 @@ async def reset_account_bans(account_id: int):
             cursor = conn.cursor()
             cursor.execute("DELETE FROM channel_bans WHERE account_id = ?", (account_id,))
             count = cursor.rowcount
-            # Также сбрасываем счетчик ошибок здоровья
+            # ✅ Сбрасываем счетчик ошибок, здоровье И rate limit
             cursor.execute(
-                "UPDATE accounts SET consecutive_errors = 0, health_status = 'healthy' WHERE id = ?", 
+                "UPDATE accounts SET consecutive_errors = 0, health_status = 'healthy', rate_limited_until = NULL WHERE id = ?", 
                 (account_id,)
             )
         
-        return {"status": "ok", "removed": count}
+        return {"status": "ok", "removed": count, "message": "✅ Баны удалены, rate limit сброшен"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
