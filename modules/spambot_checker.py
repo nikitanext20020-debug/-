@@ -50,6 +50,17 @@ PATTERNS_OK = [
 PATTERNS_LIMITED = [
     "limited until", "ограничен до", "limited in your account",
     "вы временно ограничены",
+    "пока действуют ограничения",
+    "не сможете писать тем",
+    "не сможете писать пользователям",
+    "пока аккаунт ограничен",
+    "while the account is limited",
+    "while the limits are active",
+    "you will not be able to write to",
+    "you won't be able to write to",
+    "you will not be able to send messages to",
+    "you won't be able to send messages to",
+    "cannot write to people",
 ]
 PATTERNS_BLOCKED = [
     "you're banned", "your account has been blocked",
@@ -94,6 +105,25 @@ class SpamBotChecker:
             if p in t:
                 return "limited"
         return "unknown"
+
+    @classmethod
+    def _select_status_message(cls, messages) -> str:
+        """Выбирает из последних входящих сообщений то, где есть статус."""
+        incoming = []
+        for message in messages or []:
+            if getattr(message, "out", False):
+                continue
+            text = getattr(message, "text", None) or getattr(message, "message", "")
+            if text:
+                incoming.append(text)
+
+        for text in incoming:
+            if cls._parse_status(text) != "unknown":
+                return text
+        combined = " ".join(incoming)
+        if cls._parse_status(combined) != "unknown":
+            return combined
+        return incoming[0] if incoming else ""
 
     @staticmethod
     def _parse_unblock_time(text: str) -> Optional[datetime]:
@@ -155,21 +185,31 @@ class SpamBotChecker:
 
         # Берём последние сообщения от бота
         try:
-            messages = await self.client.get_messages(bot, limit=3)
+            messages = await self.client.get_messages(bot, limit=10)
         except Exception as e:
             return SpamBotResult("error", f"Не удалось получить ответ: {e}")
 
-        # Ищем самое свежее НЕ исходящее сообщение
+        # SpamBot может прислать сначала приветствие, а затем отдельным
+        # сообщением фактический статус. Выбираем статусное сообщение.
+        selected_text = self._select_status_message(messages)
         bot_msg = None
         for m in messages:
-            if not m.out and m.text:
+            text_value = getattr(m, "text", None) or getattr(m, "message", "")
+            if not getattr(m, "out", False) and text_value == selected_text:
                 bot_msg = m
                 break
+        if bot_msg is None:
+            for m in messages:
+                if not getattr(m, "out", False) and (
+                    getattr(m, "text", None) or getattr(m, "message", "")
+                ):
+                    bot_msg = m
+                    break
 
         if bot_msg is None:
             return SpamBotResult("unknown", "Бот не ответил")
 
-        text = bot_msg.text or bot_msg.message or ""
+        text = selected_text or bot_msg.text or bot_msg.message or ""
         status = self._parse_status(text)
         unblock_at = self._parse_unblock_time(text) if status in ("limited", "blocked") else None
 

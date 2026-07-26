@@ -4,6 +4,7 @@
 import sqlite3
 import json
 import os
+import random
 import time
 import threading
 from functools import wraps
@@ -325,7 +326,18 @@ class Database:
                 ('consecutive_errors', 'INTEGER DEFAULT 0'),
                 ('last_success_at', 'TIMESTAMP'),
                 ('health_status', "TEXT DEFAULT 'healthy'"),
-                ('rate_limited_until', 'TIMESTAMP')
+                ('rate_limited_until', 'TIMESTAMP'),
+                ('spambot_status', "TEXT DEFAULT 'unknown'"),
+                ('spambot_checked_at', 'TIMESTAMP'),
+                ('spambot_message', 'TEXT'),
+                ('comment_status', "TEXT DEFAULT 'unknown'"),
+                ('comment_blocked', 'INTEGER DEFAULT 0'),
+                ('first_name', 'TEXT'),
+                ('username', 'TEXT'),
+                ('owned_channel', 'TEXT'),
+                ('work_mode_override', 'TEXT'),
+                ('join_mode', "TEXT DEFAULT 'normal'"),
+                ('next_join_at', 'REAL'),
             ]
             for col_name, col_type in health_columns:
                 try:
@@ -994,8 +1006,9 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO accounts (phone, session_name, api_id, api_hash)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO accounts
+                    (phone, session_name, api_id, api_hash, join_mode, next_join_at)
+                VALUES (?, ?, ?, ?, 'new', NULL)
             ''', (phone, session_name, api_id, api_hash))
             return cursor.lastrowid
 
@@ -1020,6 +1033,157 @@ class Database:
                 return dict(zip(columns, row))
             return None
 
+    def get_account_mode_override(self, account_id: int) -> Optional[str]:
+        """Возвращает per-account режим или None для наследования общего."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT work_mode_override FROM accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return row["work_mode_override"] or None
+
+    def set_account_mode_override(
+        self, account_id: int, mode: Optional[str]
+    ) -> Optional[str]:
+        """Атомарно сохраняет режим аккаунта; None сбрасывает override."""
+        allowed = {"powerful", "neutral", "chill"}
+        normalized = None if mode in (None, "", "inherit") else str(mode).strip().lower()
+        if normalized is not None and normalized not in allowed:
+            raise ValueError("Недопустимый режим аккаунта")
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE accounts SET work_mode_override = ? WHERE id = ?",
+                (normalized, account_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("Аккаунт не найден")
+        return normalized
+
+    @staticmethod
+    def _join_mode_delays() -> Dict[str, Optional[tuple]]:
+        from config import Config
+
+        return Config.JOIN_MODE_DELAYS
+
+    def get_account_join_state(
+        self, account_id: int, now: Optional[float] = None
+    ) -> Dict:
+        """Возвращает режим вступлений и оставшееся время до следующего слота."""
+        current_time = time.time() if now is None else float(now)
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT join_mode, next_join_at FROM accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+        if not row:
+            raise KeyError("Аккаунт не найден")
+
+        delays = self._join_mode_delays()
+        mode = (row["join_mode"] or "normal").strip().lower()
+        if mode not in delays:
+            mode = "normal"
+        delay_range = delays[mode]
+        next_join_at = (
+            float(row["next_join_at"])
+            if row["next_join_at"] is not None
+            else None
+        )
+        remaining = (
+            max(0, int(next_join_at - current_time))
+            if next_join_at is not None
+            else 0
+        )
+        return {
+            "mode": mode,
+            "min_delay": delay_range[0] if delay_range else None,
+            "max_delay": delay_range[1] if delay_range else None,
+            "next_join_at": next_join_at,
+            "remaining_seconds": remaining,
+        }
+
+    def set_account_join_mode(
+        self,
+        account_id: int,
+        mode: str,
+        *,
+        now: Optional[float] = None,
+        delay_seconds: Optional[int] = None,
+    ) -> Dict:
+        """Сохраняет join mode и сразу назначает персональный следующий слот."""
+        normalized = str(mode or "").strip().lower()
+        delays = self._join_mode_delays()
+        if normalized not in delays:
+            raise ValueError("Недопустимый режим вступления")
+
+        current_time = time.time() if now is None else float(now)
+        delay_range = delays[normalized]
+        next_join_at = None
+        if delay_range is not None:
+            delay = (
+                random.randint(delay_range[0], delay_range[1])
+                if delay_seconds is None
+                else int(delay_seconds)
+            )
+            if not delay_range[0] <= delay <= delay_range[1]:
+                raise ValueError("Задержка не соответствует выбранному режиму")
+            next_join_at = current_time + delay
+
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE accounts
+                SET join_mode = ?, next_join_at = ?
+                WHERE id = ?
+                """,
+                (normalized, next_join_at, account_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("Аккаунт не найден")
+        return self.get_account_join_state(account_id, now=current_time)
+
+    def schedule_next_account_join(
+        self,
+        account_id: int,
+        *,
+        now: Optional[float] = None,
+        delay_seconds: Optional[int] = None,
+    ) -> Dict:
+        """Назначает следующий слот, сохраняя текущий режим аккаунта."""
+        state = self.get_account_join_state(account_id, now=now)
+        return self.set_account_join_mode(
+            account_id,
+            state["mode"],
+            now=now,
+            delay_seconds=delay_seconds,
+        )
+
+    def activate_account_join_slot(
+        self, account_id: int, *, now: Optional[float] = None
+    ) -> Dict:
+        """Разрешает ближайшую join-попытку без обхода выключенного режима."""
+        current_time = time.time() if now is None else float(now)
+        state = self.get_account_join_state(account_id, now=current_time)
+        if state["mode"] == "off":
+            return state
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE accounts SET next_join_at = ? WHERE id = ?",
+                (current_time, account_id),
+            )
+        return self.get_account_join_state(account_id, now=current_time)
+
+    def is_account_join_due(
+        self, account_id: int, *, now: Optional[float] = None
+    ) -> bool:
+        state = self.get_account_join_state(account_id, now=now)
+        return (
+            state["mode"] != "off"
+            and state["next_join_at"] is not None
+            and state["remaining_seconds"] <= 0
+        )
+
     def assign_proxy_to_account(self, account_id: int, proxy_id: Optional[int]):
         """Привязывает или отвязывает прокси от аккаунта"""
         with self.get_connection() as conn:
@@ -1041,6 +1205,84 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE accounts SET status = ? WHERE id = ?", (status, account_id))
+
+    def update_spambot_status(
+        self,
+        account_id: int,
+        status: str,
+        message: str = "",
+        checked_at: Optional[str] = None,
+    ):
+        """Сохраняет результат SpamBot и отдельную возможность комментировать."""
+        normalized = (status or "unknown").strip().lower()
+        if normalized in ("limited", "blocked"):
+            comment_status, comment_blocked = "restricted", 1
+        elif normalized in ("ok", "unblocked"):
+            comment_status, comment_blocked = "available", 0
+        else:
+            comment_status, comment_blocked = None, None
+
+        msk_tz = timezone(timedelta(hours=3))
+        timestamp = checked_at or datetime.now(msk_tz).strftime("%Y-%m-%d %H:%M:%S")
+        with self.get_connection() as conn:
+            if comment_status is None:
+                conn.execute(
+                    """
+                    UPDATE accounts
+                    SET spambot_status = ?,
+                        spambot_checked_at = ?,
+                        spambot_message = ?
+                    WHERE id = ?
+                    """,
+                    (normalized, timestamp, (message or "").strip()[:1000], account_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE accounts
+                    SET spambot_status = ?,
+                        spambot_checked_at = ?,
+                        spambot_message = ?,
+                        comment_status = ?,
+                        comment_blocked = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized,
+                        timestamp,
+                        (message or "").strip()[:1000],
+                        comment_status,
+                        comment_blocked,
+                        account_id,
+                    ),
+                )
+
+    def get_spambot_status(self, account_id: int) -> Dict:
+        """Возвращает последнее состояние SpamBot/комментариев аккаунта."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT spambot_status, spambot_checked_at, spambot_message,
+                       comment_status, comment_blocked
+                FROM accounts WHERE id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+        if not row:
+            return {
+                "spambot_status": "unknown",
+                "spambot_checked_at": None,
+                "spambot_message": "",
+                "comment_status": "unknown",
+                "comment_blocked": False,
+            }
+        return {
+            "spambot_status": row["spambot_status"] or "unknown",
+            "spambot_checked_at": row["spambot_checked_at"],
+            "spambot_message": row["spambot_message"] or "",
+            "comment_status": row["comment_status"] or "unknown",
+            "comment_blocked": bool(row["comment_blocked"]),
+        }
 
     # --- Обработанные посты ---
     @db_retry(max_attempts=5, default=False)
@@ -1166,6 +1408,51 @@ class Database:
                 "incoming_messages": incoming_msgs,
                 "likes": likes
             }
+
+    def clear_statistics(self) -> Dict[str, int]:
+        """Очищает только отчётные таблицы, не меняя рабочее состояние."""
+        tables = (
+            "sent_comments",
+            "account_stats",
+            "daily_stats",
+            "logs",
+            "invite_stats",
+            "mass_send_results",
+            "mass_send_campaigns",
+            "rate_limit_history",
+        )
+        deleted: Dict[str, int] = {}
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            for table in tables:
+                try:
+                    cursor.execute(f"DELETE FROM {table}")
+                    deleted[table] = cursor.rowcount
+                except sqlite3.OperationalError:
+                    deleted[table] = 0
+        return deleted
+
+    def reset_operational_state(self) -> Dict[str, int]:
+        """Сбрасывает локальные рабочие блокировки без удаления аккаунтов."""
+        deleted: Dict[str, int] = {}
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            for table in ("channel_bans", "processed_posts", "channel_locks"):
+                try:
+                    cursor.execute(f"DELETE FROM {table}")
+                    deleted[table] = cursor.rowcount
+                except sqlite3.OperationalError:
+                    deleted[table] = 0
+            cursor.execute(
+                """
+                UPDATE accounts
+                SET consecutive_errors = 0,
+                    health_status = 'healthy',
+                    rate_limited_until = NULL
+                """
+            )
+            deleted["accounts_reset"] = cursor.rowcount
+        return deleted
 
     # --- Настройки ---
     def set_setting(self, key: str, value: Any):
@@ -1381,8 +1668,8 @@ class Database:
             rate_limited_until = datetime.now(msk_tz) + timedelta(seconds=seconds + 10)
             ts_str = rate_limited_until.strftime('%Y-%m-%d %H:%M:%S')
             
-            # Если FloodWait > 1 часа, помечаем как rate-limited
-            if seconds > 3600:
+            # FloodWait от часа и дольше — account-level rate limit.
+            if seconds >= 3600:
                 cursor.execute('''
                     UPDATE accounts 
                     SET rate_limited_until = ?,
@@ -1391,10 +1678,30 @@ class Database:
                 ''', (ts_str, account_id))
             else:
                 cursor.execute('''
-                    UPDATE accounts 
+                    UPDATE accounts
                     SET rate_limited_until = ?
                     WHERE id = ?
                 ''', (ts_str, account_id))
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS rate_limit_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    action TEXT,
+                    duration_seconds INTEGER,
+                    triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    resolved_at TIMESTAMP,
+                    FOREIGN KEY(account_id) REFERENCES accounts(id)
+                );
+            """)
+            cursor.execute(
+                """
+                INSERT INTO rate_limit_history
+                (account_id, action, duration_seconds, triggered_at)
+                VALUES (?, 'flood_wait', ?, CURRENT_TIMESTAMP)
+                """,
+                (account_id, int(seconds)),
+            )
     
     def get_account_health(self, account_id: int) -> Dict:
         """Возвращает информацию о здоровье аккаунта"""
@@ -2848,18 +3155,6 @@ class Database:
             except:
                 return 0
 
-    def mark_channel_expired(self, channel_link: str):
-        """Отмечает канал как истёкший"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    "UPDATE found_channels SET status = 'expired' WHERE link = ?",
-                    (channel_link,)
-                )
-            except:
-                pass
-
     def get_found_chats(self, keyword: str = None, limit: int = 500) -> list:
         """Получает найденные чаты/группы"""
         with self.get_connection() as conn:
@@ -2899,7 +3194,20 @@ class Database:
             try:
                 cursor.execute(
                     """
-                    INSERT OR IGNORE INTO found_chats 
+                    CREATE TABLE IF NOT EXISTS found_chats (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chat INTEGER UNIQUE NOT NULL,
+                        title TEXT,
+                        members_count INTEGER DEFAULT 0,
+                        is_megagroup BOOLEAN DEFAULT 0,
+                        keyword TEXT,
+                        found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO found_chats
                     (chat, title, members_count, keyword, found_at)
                     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
@@ -2976,7 +3284,8 @@ class Database:
                     "SELECT COUNT(*) as cnt FROM rate_limit_history WHERE account_id = ?",
                     (account_id,)
                 )
-                total = cursor.fetchone()['cnt'] if cursor.fetchone() else 0
+                total_row = cursor.fetchone()
+                total = total_row['cnt'] if total_row else 0
                 
                 # Последний лимит
                 cursor.execute(
@@ -2989,7 +3298,8 @@ class Database:
                     """,
                     (account_id,)
                 )
-                last = dict(cursor.fetchone()) if cursor.fetchone() else None
+                last_row = cursor.fetchone()
+                last = dict(last_row) if last_row else None
                 
                 # По действиям
                 cursor.execute(

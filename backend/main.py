@@ -408,6 +408,12 @@ class PasswordVerifyRequest(BaseModel):
     phone: str
     password: str
 
+class AccountModeUpdate(BaseModel):
+    mode: str
+
+class AccountJoinModeUpdate(BaseModel):
+    mode: str
+
 #startup_event removed and moved to lifespan
 
 @app.get("/accounts")
@@ -430,6 +436,16 @@ async def get_accounts():
         # Проверяем health status
         health = db.get_account_health(acc['id'])
         acc['health_status'] = health.get('health_status', 'unknown')
+        # Отдельно показываем возможность комментировать и последний ответ
+        # SpamBot — это не то же самое, что процесс воркера или бан канала.
+        try:
+            acc.update(db.get_spambot_status(acc['id']))
+        except Exception:
+            acc.setdefault('spambot_status', 'unknown')
+            acc.setdefault('spambot_checked_at', None)
+            acc.setdefault('spambot_message', '')
+            acc.setdefault('comment_status', 'unknown')
+            acc.setdefault('comment_blocked', False)
         
         # ✅ Добавляем display_name
         acc['display_name'] = db.get_account_display_name(acc['id'])
@@ -452,10 +468,63 @@ async def get_accounts():
         
         # ✅ Добавляем count вступлений
         acc['joined_channels_count'] = db.get_account_joined_count(acc['id'])
+
+        # Персональный режим постепенного вступления и таймер.
+        try:
+            join_state = db.get_account_join_state(acc['id'])
+            acc['join_mode'] = join_state['mode']
+            acc['join_min_delay'] = join_state['min_delay']
+            acc['join_max_delay'] = join_state['max_delay']
+            acc['join_next_at'] = join_state['next_join_at']
+            acc['join_remaining_seconds'] = join_state['remaining_seconds']
+        except Exception:
+            acc.setdefault('join_mode', 'normal')
+            acc.setdefault('join_min_delay', 30)
+            acc.setdefault('join_max_delay', 60)
+            acc.setdefault('join_next_at', None)
+            acc.setdefault('join_remaining_seconds', 0)
     
     return accounts
 
 # ✅ НОВЫЕ ЭНДПОИНТЫ ДЛЯ 8 ФИЧ
+
+@app.patch("/accounts/{account_id}/mode")
+async def update_account_mode(account_id: int, data: AccountModeUpdate):
+    """Устанавливает per-account режим или возвращает его к общему."""
+    if not db.get_account(account_id):
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    mode = (data.mode or "").strip().lower()
+    if mode not in {"inherit", "powerful", "neutral", "chill"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Режим должен быть inherit, powerful, neutral или chill",
+        )
+    try:
+        saved = db.set_account_mode_override(
+            account_id, None if mode == "inherit" else mode
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"account_id": account_id, "mode": saved or "inherit"}
+
+@app.patch("/accounts/{account_id}/join-mode")
+async def update_account_join_mode(
+    account_id: int, data: AccountJoinModeUpdate
+):
+    """Устанавливает per-account темп постепенного вступления."""
+    if not db.get_account(account_id):
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    mode = (data.mode or "").strip().lower()
+    if mode not in Config.JOIN_MODE_DELAYS:
+        raise HTTPException(
+            status_code=422,
+            detail="Режим должен быть off, new, careful или normal",
+        )
+    try:
+        state = db.set_account_join_mode(account_id, mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"account_id": account_id, **state}
 
 @app.get("/accounts/{account_id}/stats-full")
 async def get_account_stats_full(account_id: int):
@@ -479,13 +548,14 @@ async def get_account_stats_full(account_id: int):
         
         # Здоровье
         health = db.get_account_health(account_id)
+        invite_stats = db.get_invite_stats(account_id)
         
         return {
             "account_id": account_id,
             "display_name": display_name,
             "phone": account.get('phone'),
-            "comments": stats.get('comments_total', 0),
-            "invites": stats.get('invites_total', 0),
+            "comments": stats.get('comments', 0),
+            "invites": invite_stats.get('success', 0),
             "joined_channels": joined_count,
             "banned_count": banned_count,
             "health_status": health.get('health_status', 'unknown'),
@@ -531,6 +601,47 @@ async def clear_found_chats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+class ChatSearchRequest(BaseModel):
+    keywords: List[str]
+
+
+@app.post("/discovery/chats/search")
+async def search_found_chats(request: ChatSearchRequest):
+    """Запускает поиск групп в event loop активного Telegram-воркера."""
+    keywords = []
+    seen = set()
+    for item in request.keywords:
+        keyword = str(item).strip()
+        key = keyword.casefold()
+        if keyword and key not in seen:
+            seen.add(key)
+            keywords.append(keyword)
+    if not keywords:
+        raise HTTPException(status_code=400, detail="Укажите ключевые слова")
+
+    active_worker = next(
+        (
+            worker
+            for worker in workers.values()
+            if worker.is_running and getattr(worker, "keyword_search", None)
+        ),
+        None,
+    )
+    if not active_worker:
+        raise HTTPException(
+            status_code=400,
+            detail="Для поиска групп нужен хотя бы один запущенный аккаунт",
+        )
+
+    coro = active_worker.keyword_search.search_groups_by_keywords(keywords)
+    future = active_worker.run_task(coro)
+    if not future:
+        coro.close()
+        raise HTTPException(status_code=500, detail="Не удалось запустить поиск групп")
+    return {"status": "started", "keywords": keywords}
+
+
 # ✅ NEW: Smart rate limit management
 @app.get("/accounts/{account_id}/rate-limit-check")
 async def check_rate_limit_status(account_id: int):
@@ -541,45 +652,28 @@ async def check_rate_limit_status(account_id: int):
             raise HTTPException(status_code=404, detail="Account not found")
         
         health = db.get_account_health(account_id)
-        rate_limited_until = account.get('rate_limited_until')
-        
-        # Проверяем истекла ли пауза
-        if rate_limited_until:
-            from datetime import datetime, timezone
-            try:
-                limited_until = datetime.fromisoformat(str(rate_limited_until).replace('Z', '+00:00'))
-                now = datetime.now(timezone.utc)
-                if now < limited_until:
-                    # Ещё в лимите
-                    remaining = int((limited_until - now).total_seconds())
-                    return {
-                        "status": "rate_limited",
-                        "remaining_seconds": remaining,
-                        "blocked": True
-                    }
-            except:
-                pass
-        
-        # ✅ Пауза истекла! Автоматически запустить если был stopped
+        remaining = db.get_account_pause_seconds(account_id)
+        if remaining > 0:
+            return {
+                "status": "rate_limited",
+                "remaining_seconds": remaining,
+                "blocked": True,
+                "auto_restarted": False,
+            }
+
+        auto_restarted = False
         if health.get('health_status') in ['paused', 'rate_limited']:
-            if account_id not in workers:
-                # Создать новый воркер и запустить
-                try:
-                    await API.post(f'/accounts/{account_id}/start')
-                except:
-                    pass
-            elif not workers[account_id].is_running:
-                # Перезапустить существующий
-                try:
-                    workers[account_id].start()
-                except:
-                    pass
+            db.reset_account_health(account_id)
+            existing = workers.get(account_id)
+            if not _worker_is_alive(existing):
+                worker = _start_worker_for_account(account)
+                auto_restarted = _worker_is_alive(worker)
         
         return {
             "status": "ready",
             "remaining_seconds": 0,
             "blocked": False,
-            "auto_restarted": True
+            "auto_restarted": auto_restarted,
         }
     except HTTPException:
         raise
@@ -606,10 +700,10 @@ async def get_rate_limit_history(account_id: int):
 async def sync_account_profiles():
     """Синхронизировать профили running аккаунтов с Telegram"""
     try:
-        synced = []
+        pending = []
         print(f"[sync-profiles] Начало синхронизации, workers: {list(workers.keys())}")
         
-        for account_id, worker in workers.items():
+        for account_id, worker in list(workers.items()):
             print(f"[sync-profiles] Проверка аккаунта {account_id}, is_running={worker.is_running}")
             
             if not worker.is_running:
@@ -617,7 +711,7 @@ async def sync_account_profiles():
             
             try:
                 # ✅ Запускаем async функцию в loop воркера
-                async def get_profile():
+                async def get_profile(account_id=account_id, worker=worker):
                     try:
                         me = await worker.client.get_me()
                         first_name = me.first_name or ""
@@ -635,22 +729,31 @@ async def sync_account_profiles():
                             }
                     except Exception as e:
                         print(f"[sync-profiles] Ошибка для {account_id}: {e}")
-                        import traceback
-                        traceback.print_exc()
                     return None
                 
                 # Запускаем в loop воркера
                 if hasattr(worker, 'loop') and worker.loop and worker.loop.is_running():
                     future = asyncio.run_coroutine_threadsafe(get_profile(), worker.loop)
-                    result = future.result(timeout=5)
-                    if result:
-                        synced.append(result)
+                    pending.append((account_id, future))
                 else:
                     print(f"[sync-profiles] Loop воркера {account_id} не запущен")
             except Exception as e:
                 print(f"[sync-profiles] Exception для {account_id}: {e}")
-                import traceback
-                traceback.print_exc()
+
+        async def wait_profile(account_id, future):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.wrap_future(future),
+                    timeout=5,
+                )
+            except Exception as e:
+                print(f"[sync-profiles] Таймаут/ошибка для {account_id}: {e}")
+                return None
+
+        results = await asyncio.gather(
+            *(wait_profile(account_id, future) for account_id, future in pending)
+        )
+        synced = [result for result in results if result]
         
         print(f"[sync-profiles] ✅ Синхронизация завершена, synced={len(synced)}")
         return {
@@ -1147,19 +1250,27 @@ async def start_bot(acc_id: int):
     if not account:
         raise HTTPException(status_code=404, detail="Аккаунт не найден")
     
+    if account.get("status") in ("banned", "deactivated", "frozen"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Аккаунт имеет критический статус: {account.get('status')}",
+        )
+
     if acc_id in workers and workers[acc_id].is_running:
         return {"status": "already_running"}
     
     _start_worker_for_account(account)
-    db.update_account_status(acc_id, 'active')
     return {"status": "started"}
 
 @app.post("/accounts/{acc_id}/stop")
 async def stop_bot(acc_id: int):
+    account = db.get_account(acc_id)
     if acc_id in workers:
-        workers[acc_id].stop()
-        del workers[acc_id]
-        db.update_account_status(acc_id, 'stopped')
+        _stop_worker_for_account(acc_id)
+        if account and account.get("status") not in (
+            "banned", "deactivated", "frozen"
+        ):
+            db.update_account_status(acc_id, 'stopped')
         return {"status": "stopped"}
     return {"status": "not_running"}
 
@@ -1167,8 +1278,7 @@ async def stop_bot(acc_id: int):
 async def delete_account(acc_id: int):
     # Останавливаем бота если он работает
     if acc_id in workers:
-        workers[acc_id].stop()
-        del workers[acc_id]
+        _stop_worker_for_account(acc_id)
     
     # Удаляем из базы
     db.delete_account(acc_id)
@@ -1663,151 +1773,43 @@ async def recheck_all_closed_channels():
 
 @app.post("/discovery/channels/join-private")
 async def join_all_private_channels():
-    """Вступает во все приватные каналы всеми запущенными аккаунтами"""
-    global global_pause
-    from telethon.tl.functions.messages import ImportChatInviteRequest
-    from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
-    import asyncio
-    import re
-    
+    """Активирует постепенное вступление для подходящих запущенных аккаунтов."""
     running_workers = [(acc_id, w) for acc_id, w in workers.items() if w.is_running]
     if not running_workers:
         raise HTTPException(status_code=400, detail="Нет запущенных аккаунтов")
-    
-    # Получаем все приватные каналы из базы
+
     all_channels = db.get_found_channels(limit=500, only_open_comments=False)
     private_channels = [ch for ch in all_channels if ch['channel'].startswith('+')]
-    
     if not private_channels:
         return {"status": "ok", "message": "Нет приватных каналов", "total": 0}
-    
-    # Включаем глобальную паузу
-    global_pause = True
-    print("[join-private] ⏸️ Глобальная пауза включена")
-    
-    total = len(private_channels)
-    results = {"joined": 0, "already": 0, "errors": 0, "channels_updated": 0, "total": total, "processed": 0, "frozen": 0, "rate_limited": 0}
-    
-    # Словарь для отслеживания rate limit по аккаунтам
-    account_wait_until = {}
-    
-    print(f"[join-private] Начинаем вступление в {total} приватных каналов...")
-    
-    for idx, ch in enumerate(private_channels):
-        invite_hash = ch['channel'][1:]  # Убираем +
-        channel_title = ch.get('title', ch['channel'])
-        
-        print(f"[join-private] [{idx+1}/{total}] Обрабатываем: {channel_title}")
-        
-        # Ищем аккаунт без rate limit
-        current_time = asyncio.get_event_loop().time()
-        available_worker = None
-        
-        for acc_id, worker in running_workers:
-            # Проверяем rate limit
-            wait_until = account_wait_until.get(acc_id, 0)
-            if current_time >= wait_until:
-                available_worker = (acc_id, worker)
-                break
-        
-        if not available_worker:
-            # Все аккаунты в rate limit - ждём минимальное время
-            min_wait = min(account_wait_until.values()) - current_time
-            if min_wait > 0:
-                print(f"[join-private] ⏳ Все аккаунты в rate limit, ждём {int(min_wait)} сек...")
-                results["rate_limited"] += 1
-                await asyncio.sleep(min(min_wait, 60))  # Ждём максимум 60 сек
-            available_worker = running_workers[idx % len(running_workers)]
-        
-        acc_id, worker = available_worker
-        
-        async def try_join():
-            try:
-                result = await worker.client(ImportChatInviteRequest(invite_hash))
-                entity = result.chats[0] if result.chats else None
-                if entity:
-                    # Сохраняем channel_id и title в базу
-                    db.update_channel_info(
-                        ch['channel'], 
-                        channel_id=entity.id,
-                        title=getattr(entity, 'title', None)
-                    )
-                    
-                    # Вступаем в группу обсуждений
-                    try:
-                        full = await worker.client(GetFullChannelRequest(entity))
-                        if full.full_chat.linked_chat_id:
-                            linked = await worker.client.get_entity(full.full_chat.linked_chat_id)
-                            await worker.client(JoinChannelRequest(linked))
-                    except:
-                        pass
-                    
-                    return "joined", getattr(entity, 'title', 'unknown')
-            except Exception as e:
-                err_str = str(e)
-                err_lower = err_str.lower()
-                
-                if 'already' in err_lower or 'user_already' in err_lower:
-                    return "already", None
-                elif 'frozen' in err_lower:
-                    return "frozen", acc_id  # Возвращаем ID аккаунта
-                elif 'wait' in err_lower:
-                    # Извлекаем время ожидания
-                    match = re.search(r'(\d+)\s*seconds', err_str)
-                    wait_time = int(match.group(1)) if match else 300
-                    return "rate_limit", wait_time
-                
-                return "error", str(e)
-            return "error", "unknown"
-        
-        try:
-            coro = try_join()
-            future = worker.run_task(coro)
-            if future:
-                result, info = future.result(timeout=30)
-                if result == "joined":
-                    results["joined"] += 1
-                    results["channels_updated"] += 1
-                    print(f"[join-private] ✅ Вступили: {info}")
-                elif result == "already":
-                    results["already"] += 1
-                    print(f"[join-private] 📌 Уже вступили")
-                elif result == "frozen":
-                    results["frozen"] += 1
-                    # Помечаем аккаунт как frozen и исключаем из списка
-                    frozen_acc_id = info
-                    running_workers = [(a, w) for a, w in running_workers if a != frozen_acc_id]
-                    db.update_account_status(frozen_acc_id, "frozen_join")
-                    print(f"[join-private] 🥶 Аккаунт {frozen_acc_id} заморожен для вступлений, исключаем")
-                    if not running_workers:
-                        print(f"[join-private] ❌ Все аккаунты заморожены!")
-                        break
-                elif result == "rate_limit":
-                    results["rate_limited"] += 1
-                    wait_time = info if isinstance(info, int) else 300
-                    account_wait_until[acc_id] = asyncio.get_event_loop().time() + wait_time
-                    print(f"[join-private] ⏳ Rate limit {wait_time} сек для аккаунта {acc_id}")
-                else:
-                    results["errors"] += 1
-                    print(f"[join-private] ❌ Ошибка: {info}")
-        except Exception as e:
-            results["errors"] += 1
-            print(f"[join-private] ❌ Таймаут: {e}")
-        
-        results["processed"] = idx + 1
-        
-        # Случайная задержка 30-60 сек чтобы не ловить rate limit
-        import random
-        delay = random.randint(30, 60)
-        print(f"[join-private] ⏳ Ждём {delay} сек...")
-        await asyncio.sleep(delay)
-    
-    # Снимаем глобальную паузу
-    global_pause = False
-    print("[join-private] ▶️ Глобальная пауза снята")
-    
-    print(f"[join-private] Готово! Вступили: {results['joined']}, Уже были: {results['already']}, Заморожено: {results['frozen']}, Rate limit: {results['rate_limited']}, Ошибок: {results['errors']}")
-    return results
+
+    queued_accounts = []
+    skipped_accounts = []
+    now = time.time()
+    blocked_statuses = {"banned", "deactivated", "frozen", "frozen_join"}
+
+    for account_id, _worker in running_workers:
+        account = db.get_account(account_id) or {}
+        status = str(account.get("status") or "").lower()
+        if status in blocked_statuses:
+            skipped_accounts.append({"account_id": account_id, "reason": status})
+            continue
+
+        state = db.get_account_join_state(account_id, now=now)
+        if state["mode"] == "off":
+            skipped_accounts.append({"account_id": account_id, "reason": "off"})
+            continue
+
+        db.activate_account_join_slot(account_id, now=now)
+        queued_accounts.append(account_id)
+
+    return {
+        "status": "queued",
+        "message": "Приватные каналы поставлены в постепенную очередь",
+        "total": len(private_channels),
+        "queued_accounts": queued_accounts,
+        "skipped_accounts": skipped_accounts,
+    }
 
 @app.post("/discovery/channels/fix-private-titles")
 async def fix_private_channel_titles():
@@ -2570,61 +2572,71 @@ async def get_stats_24h():
 @app.post("/admin/clear-stats")
 async def clear_all_stats():
     """
-    Полностью очищает статистику: комментарии, лайки, логи.
-    Использовать, если данные устарели или нужно начать с чистого листа.
+    Очищает только отчётные таблицы. Рабочие баны и processed_posts
+    сохраняются, чтобы не запустить повторную обработку старых постов.
     """
     try:
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # 1. Удаляем отправленные комментарии
-            cursor.execute("DELETE FROM sent_comments")
-            comments_deleted = cursor.rowcount
-            
-            # 2. Сбрасываем счетчики лайков/комментов у аккаунтов
-            cursor.execute("DELETE FROM account_stats")
-            stats_deleted = cursor.rowcount
-            
-            # 3. Очищаем дневную статистику
-            cursor.execute("DELETE FROM daily_stats")
-            daily_deleted = cursor.rowcount
-            
-            # 4. Очищаем логи
-            cursor.execute("DELETE FROM logs")
-            logs_deleted = cursor.rowcount
-            
-            # 5. Очищаем обработанные посты (чтобы боты могли писать заново)
-            cursor.execute("DELETE FROM processed_posts")
-            posts_deleted = cursor.rowcount
-            
-            # 6. Сбрасываем список банов для всех аккаунтов
-            cursor.execute("DELETE FROM channel_bans")
-            bans_deleted = cursor.rowcount
-            
-            # 7. Сбрасываем статусы "закрытых комментариев" у каналов
-            cursor.execute("UPDATE found_channels SET can_comment = 1, status = 'active'")
-            channels_updated = cursor.rowcount
-            
-            # 8. Сбрасываем health статусы аккаунтов
-            cursor.execute("UPDATE accounts SET consecutive_errors = 0, health_status = 'healthy'")
-            accounts_updated = cursor.rowcount
-            
+        deleted = db.clear_statistics()
         return {
             "status": "ok",
-            "message": f"База очищена. Удалено комментариев: {comments_deleted}.",
-            "details": {
-                "comments": comments_deleted,
-                "stats": stats_deleted,
-                "daily_stats": daily_deleted,
-                "logs": logs_deleted,
-                "processed_posts": posts_deleted,
-                "bans": bans_deleted,
-                "channels_updated": channels_updated,
-                "accounts_updated": accounts_updated
-            }
+            "message": "Статистика очищена; рабочее состояние сохранено.",
+            "details": deleted,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/reset-operational-state")
+async def reset_operational_state():
+    """Сбрасывает локальные рабочие блокировки с безопасным перезапуском."""
+    running_ids = [
+        account_id
+        for account_id, worker in list(workers.items())
+        if _worker_is_alive(worker)
+    ]
+    accounts_before = {
+        account_id: db.get_account(account_id)
+        for account_id in running_ids
+    }
+
+    if running_ids:
+        await asyncio.gather(
+            *(
+                asyncio.to_thread(_stop_worker_for_account, account_id)
+                for account_id in running_ids
+            )
+        )
+        if any(_worker_is_alive(workers.get(account_id)) for account_id in running_ids):
+            raise HTTPException(
+                status_code=409,
+                detail="Не все воркеры успели остановиться; сброс отменён.",
+            )
+
+    deleted = db.reset_operational_state()
+    restarted = []
+    skipped = []
+    for account_id, account in accounts_before.items():
+        current = db.get_account(account_id) or {}
+        if current.get("status") in ("banned", "deactivated", "frozen"):
+            skipped.append(account_id)
+            continue
+        try:
+            worker = await asyncio.to_thread(
+                _start_worker_for_account,
+                current or account,
+            )
+            if worker is not None:
+                restarted.append(account_id)
+        except Exception:
+            skipped.append(account_id)
+
+    return {
+        "status": "ok",
+        "message": "Рабочие состояния сброшены; доступные аккаунты перезапускаются.",
+        "deleted": deleted,
+        "restarted": restarted,
+        "skipped": skipped,
+    }
 
 @app.get("/channels/available/{account_id}")
 async def get_available_channels(account_id: int):
@@ -3415,11 +3427,6 @@ async def stop_channel_filter():
     return {"status": "stopped"}
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
-
-
 # === Web UI (отдаём frontend из /static) ===========================
 # Этот блок должен быть в самом конце, чтобы не перехватывать API-роуты.
 
@@ -3462,3 +3469,8 @@ async def config_status():
     saved_hash = db.get_setting('telegram_api_hash', None)
     configured = bool((saved_id and saved_hash) or (Config.API_ID and Config.API_HASH))
     return {"api_configured": configured}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)

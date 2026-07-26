@@ -119,10 +119,17 @@ class Config:
     # Задержки (в секундах)
     COMMENT_DELAY_MIN = 1
     COMMENT_DELAY_MAX = 3
-    JOIN_CHANNEL_DELAY_MIN = 60
-    JOIN_CHANNEL_DELAY_MAX = 120
     RESPONSE_DELAY_MIN = 10
     RESPONSE_DELAY_MAX = 30
+
+    # Per-account режимы постепенного вступления в каналы.
+    # None означает, что автоматические вступления выключены.
+    JOIN_MODE_DELAYS = {
+        "off": None,
+        "new": (120, 180),
+        "careful": (60, 120),
+        "normal": (30, 60),
+    }
     
     # Настройки автоответчика
     AUTORESPONDER_ENABLED = True
@@ -190,6 +197,9 @@ class Config:
     # PeerFlood cooldown (12 hours). Hard-stop mass send / invite on PeerFlood
     # and persist via Database.record_flood_wait — never raise limits to bypass.
     PEER_FLOOD_COOLDOWN_SECONDS = 43200
+    # SpamBot status polling. The worker also checks immediately after a
+    # comment-send restriction error, with its own cooldown protection.
+    SPAMBOT_CHECK_INTERVAL_SECONDS = 900
 
     # Channel creator settings
     CHANNEL_WARMUP_POSTS_COUNT = 5

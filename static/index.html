@@ -91,6 +91,25 @@
       <div class="metric"><span class="metric-label">Ошибок за сегодня</span><span class="metric-value" id="dash-errors-today">—</span></div>
     </div>
 
+    <div class="dash-quick-actions" id="dashboard-quick-actions">
+      <div class="dash-action-group">
+        <span class="dash-action-label">Аккаунты</span>
+        <button class="btn btn-primary btn-sm" id="btn-dashboard-start-all">Запустить доступные</button>
+        <button class="btn btn-ghost btn-sm" id="btn-dashboard-stop-all">Остановить работающие</button>
+      </div>
+      <div class="dash-action-group">
+        <span class="dash-action-label">Система</span>
+        <button class="btn btn-ghost btn-sm" id="btn-dashboard-pause">Пауза</button>
+        <button class="btn btn-ghost btn-sm" id="btn-dashboard-refresh-all">Обновить всё</button>
+        <button class="btn btn-ghost btn-sm" id="btn-dashboard-discovery">Запустить поиск каналов</button>
+      </div>
+      <div class="dash-action-group dash-action-group-danger">
+        <span class="dash-action-label">Сбросы</span>
+        <button class="btn btn-danger btn-sm" id="btn-dashboard-clear-stats">Очистить статистику</button>
+        <button class="btn btn-danger btn-sm" id="btn-dashboard-reset-operational">Сбросить рабочие состояния</button>
+      </div>
+    </div>
+
     <div class="dash-grid">
       <!-- Аккаунты -->
       <div class="dash-col">
@@ -111,6 +130,28 @@
         </div>
         <div id="dash-logs" class="dash-logs">
           <div class="logs-empty">Загрузка…</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-grid dash-feed-grid">
+      <div class="dash-col dash-feed">
+        <div class="section-head-row">
+          <h3 class="section-h3">Последние комментарии</h3>
+          <button class="btn btn-ghost btn-sm" data-goto-tab="comments">Все комментарии</button>
+        </div>
+        <div id="dash-comments-list" class="dash-feed-list">
+          <div class="empty">Загрузка…</div>
+        </div>
+      </div>
+
+      <div class="dash-col dash-feed">
+        <div class="section-head-row">
+          <h3 class="section-h3">Ошибки и критические события</h3>
+          <button class="btn btn-ghost btn-sm" data-goto-tab="logs">Все ошибки</button>
+        </div>
+        <div id="dash-errors-list" class="dash-feed-list">
+          <div class="empty">Загрузка…</div>
         </div>
       </div>
     </div>
@@ -202,7 +243,8 @@
           <div class="toggle-desc">
             При <code>PeerFloodError</code> бот идёт в <b>@SpamBot</b>, отправляет <code>/start</code>,
             парсит ответ. Если активен спам-блок — статус аккаунта помечается как
-            <code>spamblock</code>, нажимаются кнопки снятия мягкого блока.
+            <code>spamblock</code>, комментарии приостанавливаются. Проверка
+            повторяется автоматически; кнопки апелляции не нажимаются.
           </div>
         </div>
         <label class="switch">
@@ -694,6 +736,9 @@
       <div class="page-actions">
         <button class="btn btn-ghost" id="btn-refresh-stats">Обновить</button>
         <button class="btn btn-danger" id="btn-clear-stats">Очистить статистику</button>
+        <button class="btn btn-danger" id="btn-reset-operational">
+          Сбросить рабочие состояния
+        </button>
       </div>
     </div>
 

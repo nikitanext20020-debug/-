@@ -353,3 +353,9 @@ class AutoResponder:
         async def handler(event):
             await self.handle_new_message(event)
         print("👂 Автоответчик на Gemini запущен...")
+
+    async def close(self):
+        """Закрывает HTTP-сессию воркера при остановке аккаунта."""
+        if self._http_client:
+            await self._http_client.close()
+            self._http_client = None

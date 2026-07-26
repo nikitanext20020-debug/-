@@ -32,6 +32,7 @@ const API = {
   },
   get(p)         { return this.req('GET',    p); },
   post(p, b)     { return this.req('POST',   p, b); },
+  patch(p, b)     { return this.req('PATCH',  p, b); },
   put(p, b)      { return this.req('PUT',    p, b); },
   del(p)         { return this.req('DELETE', p); },
   async upload(path, formData) {
@@ -136,14 +137,18 @@ document.querySelectorAll('.tab').forEach(btn => {
 const Accounts = {
   data: [],
   proxies: [],
+  _profileSyncAt: 0,
   async refresh() {
     const grid = document.getElementById('accounts-grid');
     try {
       // ✅ Сначала синхронизируем профили из Telegram (для running аккаунтов)
-      try {
-        await API.post('/accounts/sync-profiles');
-      } catch (e) {
-        // Молча игнорируем ошибку - это не критично
+      if (Date.now() - this._profileSyncAt >= 60000) {
+        this._profileSyncAt = Date.now();
+        try {
+          await API.post('/accounts/sync-profiles');
+        } catch (e) {
+          // Молча игнорируем ошибку - это не критично
+        }
       }
       
       this.data = await API.get('/accounts');
@@ -188,10 +193,21 @@ const Accounts = {
   },
   renderCard(a) {
     const isCriticalStatus = ['banned', 'deactivated', 'frozen', 'spamblock'].includes(a.status);
-    const status = isCriticalStatus ? a.status : (a.is_running ? 'running' : (a.status || 'stopped'));
-    const statusLabel = a.status ? a.status : (a.is_running ? 'running' : 'stopped');
+    const commentsBlocked = Boolean(a.comment_blocked || a.comment_status === 'restricted');
+    const criticalLabel = {
+      banned: 'Аккаунт заблокирован',
+      deactivated: 'Аккаунт деактивирован',
+      frozen: 'Аккаунт заморожен',
+      spamblock: 'Антиспам-ограничение',
+    };
+    const status = isCriticalStatus
+      ? a.status
+      : (commentsBlocked ? 'comments-blocked' : (a.is_running ? 'running' : (a.status || 'stopped')));
+    const statusLabel = isCriticalStatus
+      ? (criticalLabel[a.status] || a.status)
+      : (commentsBlocked ? 'Комментарии ограничены' : (a.is_running ? 'Работает' : 'Остановлен'));
     const stats = a.stats || {};
-    const comments = stats.total_comments_sent || stats.comments_sent || 0;
+    const comments = stats.comments || 0;
     const banned = a.banned_channels_count || 0;
     
     // ✅ display_name с fallback на session_name или phone
@@ -207,7 +223,16 @@ const Accounts = {
     }
     
     const statusBadge = isCriticalStatus
-      ? `<span class="pill bad" style="margin-left: 6px;">${escape(a.status)}</span>`
+      ? `<span class="pill bad" style="margin-left: 6px;">${escape(criticalLabel[a.status] || a.status)}</span>`
+      : (commentsBlocked
+        ? `<span class="pill bad" style="margin-left: 6px;">Комментарии ограничены</span>`
+        : '');
+    const restrictionNotice = commentsBlocked
+      ? `<div class="restriction-note">
+          ⛔ Комментарии приостановлены
+          ${a.spambot_checked_at ? `· проверено ${escape(a.spambot_checked_at)}` : ''}
+          ${a.spambot_message ? `<div class="muted small">${escape(a.spambot_message)}</div>` : ''}
+        </div>`
       : '';
     
     // Форматирование таймаута
@@ -216,12 +241,13 @@ const Accounts = {
       : '';
     
     return `
-      <div class="account-card ${a.is_running ? 'running' : ''}">
+      <div class="account-card ${a.is_running ? 'running' : ''}" data-account-id="${a.id}">
         <div class="account-card-head">
           <div>
             <div class="account-name">${escape(displayName)} ${statusBadge}</div>
             <div class="account-phone">${escape(a.phone || '—')}</div>
             <div class="muted small">${escape(a.session_name || '')}</div>
+            ${restrictionNotice}
             ${timeoutChip}
           </div>
           <span class="account-status-dot ${escape(status)}" title="${escape(statusLabel)}"></span>
@@ -1149,6 +1175,8 @@ function gotoTab(name) {
 
 const Dashboard = {
   _timer: null,
+  _lastAccounts: [],
+  _bulkBusy: false,
 
   async refresh() {
     const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
@@ -1178,8 +1206,13 @@ const Dashboard = {
       setText('dash-errors-today', (s.errors_today ?? 0).toLocaleString('ru-RU'));
     } catch { /* ignore */ }
 
+    this._lastAccounts = accounts;
     this.renderAccounts(accounts);
-    await this.renderLogs();
+    await Promise.allSettled([
+      this.renderLogs(),
+      this.renderComments(),
+      this.renderErrors(),
+    ]);
     setText('dash-updated', 'обновлено ' + new Date().toLocaleTimeString('ru-RU'));
   },
 
@@ -1191,19 +1224,48 @@ const Dashboard = {
       return;
     }
     box.innerHTML = accounts.map(a => {
-      const status = a.is_running ? 'running' : (a.status || 'stopped');
-      const comments = (a.stats && (a.stats.total_comments_sent || a.stats.comments_sent)) || 0;
+      const commentsBlocked = Boolean(a.comment_blocked || a.comment_status === 'restricted');
+      const status = ['banned', 'deactivated', 'frozen', 'spamblock'].includes(a.status)
+        ? a.status
+        : (commentsBlocked ? 'comments-blocked' : (a.is_running ? 'running' : (a.status || 'stopped')));
+      const comments = (a.stats && a.stats.comments) || 0;
+      const mode = a.work_mode_override || 'inherit';
+      const joinMode = a.join_mode || 'normal';
+      const joinRemaining = Math.max(0, Number(a.join_remaining_seconds || 0));
+      const stateText = commentsBlocked
+        ? 'Комментарии ограничены'
+        : (a.is_running ? 'Работает' : (a.status || 'Остановлен'));
       return `
         <div class="dash-acc-row">
-          <span class="account-status-dot ${escape(status)}" title="${escape(status)}"></span>
+          <span class="account-status-dot ${escape(status)}" title="${escape(stateText)}"></span>
           <div class="dash-acc-main">
             <div class="dash-acc-phone">${escape(a.phone || '—')}</div>
-            <div class="muted small">${escape(a.health_status || status)} · ${comments} комм.</div>
+            <div class="muted small">${escape(stateText)} · ${comments} комм.</div>
+            <div class="dash-join-countdown" data-join-remaining="${joinRemaining}">
+              Вступления: <span>${joinRemaining > 0 ? Accounts.formatTime(joinRemaining) : 'готово к следующему'}</span>
+            </div>
+            ${commentsBlocked && a.spambot_checked_at
+              ? `<div class="muted small">Проверено: ${escape(a.spambot_checked_at)}</div>`
+              : ''}
           </div>
-          <button class="btn btn-sm ${a.is_running ? 'btn-ghost' : 'btn-primary'}"
-                  data-dash-act="${a.is_running ? 'stop' : 'start'}" data-id="${a.id}">
-            ${a.is_running ? 'Стоп' : 'Старт'}
-          </button>
+          <div class="dash-acc-controls">
+            <select class="dash-mode-select" data-dash-mode data-previous="${mode}" data-id="${a.id}" aria-label="Режим аккаунта">
+              <option value="inherit" ${mode === 'inherit' ? 'selected' : ''}>Общий режим</option>
+              <option value="powerful" ${mode === 'powerful' ? 'selected' : ''}>powerful</option>
+              <option value="neutral" ${mode === 'neutral' ? 'selected' : ''}>neutral</option>
+              <option value="chill" ${mode === 'chill' ? 'selected' : ''}>chill</option>
+            </select>
+            <select class="dash-mode-select dash-join-mode-select" data-dash-join-mode data-previous="${joinMode}" data-id="${a.id}" aria-label="Режим вступления">
+              <option value="off" ${joinMode === 'off' ? 'selected' : ''}>Вступления выкл.</option>
+              <option value="new" ${joinMode === 'new' ? 'selected' : ''}>Новый · 2–3 мин</option>
+              <option value="careful" ${joinMode === 'careful' ? 'selected' : ''}>Осторожный · 1–2 мин</option>
+              <option value="normal" ${joinMode === 'normal' ? 'selected' : ''}>Обычный · 30–60 сек</option>
+            </select>
+            <button class="btn btn-sm ${a.is_running ? 'btn-ghost' : 'btn-primary'}"
+                    data-dash-act="${a.is_running ? 'stop' : 'start'}" data-id="${a.id}">
+              ${a.is_running ? 'Стоп' : 'Старт'}
+            </button>
+          </div>
         </div>`;
     }).join('');
     box.querySelectorAll('[data-dash-act]').forEach(b => {
@@ -1216,6 +1278,48 @@ const Dashboard = {
           toast(act === 'start' ? 'Воркер запущен' : 'Воркер остановлен', 'ok');
           this.refresh();
         } catch (e) { toast(e.message, 'error'); b.disabled = false; }
+      });
+    });
+    box.querySelectorAll('[data-dash-mode]').forEach(select => {
+      select.addEventListener('change', async () => {
+        const id = +select.dataset.id;
+        const previous = select.dataset.previous || select.value;
+        select.disabled = true;
+        try {
+          const result = await API.patch(`/accounts/${id}/mode`, { mode: select.value });
+          select.dataset.previous = result.mode || select.value;
+          toast('Режим аккаунта сохранён', 'ok');
+        } catch (e) {
+          select.value = previous;
+          toast(e.message, 'error');
+        } finally {
+          select.disabled = false;
+        }
+      });
+    });
+    box.querySelectorAll('[data-dash-join-mode]').forEach(select => {
+      select.addEventListener('change', async () => {
+        const id = +select.dataset.id;
+        const previous = select.dataset.previous || select.value;
+        select.disabled = true;
+        try {
+          const result = await API.patch(`/accounts/${id}/join-mode`, { mode: select.value });
+          select.dataset.previous = result.mode || select.value;
+          const badge = select.closest('.dash-acc-row')?.querySelector('[data-join-remaining]');
+          if (badge) {
+            badge.dataset.joinRemaining = String(result.remaining_seconds || 0);
+            const text = badge.querySelector('span');
+            if (text) text.textContent = result.remaining_seconds > 0
+              ? Accounts.formatTime(result.remaining_seconds)
+              : 'готово к следующему';
+          }
+          toast('Режим вступления сохранён', 'ok');
+        } catch (e) {
+          select.value = previous;
+          toast(e.message, 'error');
+        } finally {
+          select.disabled = false;
+        }
       });
     });
   },
@@ -1242,6 +1346,98 @@ const Dashboard = {
     }
   },
 
+  async renderComments() {
+    const box = document.getElementById('dash-comments-list');
+    if (!box) return;
+    try {
+      const data = await API.get('/comments?limit=10');
+      if (!Array.isArray(data) || !data.length) {
+        box.innerHTML = '<div class="empty">Комментариев пока нет</div>';
+        return;
+      }
+      box.innerHTML = data.map(c => {
+        const channel = escape(c.channel || '—');
+        const channelHtml = c.link
+          ? `<a href="${escape(c.link)}" target="_blank" rel="noopener">${channel}</a>`
+          : channel;
+        return `<div class="dash-feed-row">
+          <div class="dash-feed-channel">${channelHtml}<div class="dash-feed-account">${escape(c.account_phone || '—')}</div></div>
+          <div class="dash-feed-text" title="${escape(c.comment_text || '')}">${escape(c.comment_text || '—')}</div>
+          <div class="dash-feed-time">${escape((c.sent_at || '').slice(0, 16))}</div>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      box.innerHTML = `<div class="empty">Ошибка: ${escape(e.message)}</div>`;
+    }
+  },
+
+  async renderErrors() {
+    const box = document.getElementById('dash-errors-list');
+    if (!box) return;
+    try {
+      const data = await API.get('/logs?limit=20&level=error,critical');
+      const list = Array.isArray(data) ? data : (data.logs || []);
+      if (!list.length) {
+        box.innerHTML = '<div class="empty">Ошибок нет</div>';
+        return;
+      }
+      box.innerHTML = list.map(l => {
+        const level = (l.level || 'error').toLowerCase();
+        return `<div class="dash-feed-row dash-error-row">
+          <span class="log-level ${escape(level)}">${escape(level)}</span>
+          <div class="dash-error-message">${escape(l.message || '—')}</div>
+          <div class="dash-error-account">${escape(l.phone || 'система')} · ${escape((l.timestamp || '').slice(0, 16))}</div>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      box.innerHTML = `<div class="empty">Ошибка: ${escape(e.message)}</div>`;
+    }
+  },
+
+  setBulkBusy(busy) {
+    ['btn-dashboard-start-all', 'btn-dashboard-stop-all'].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = busy;
+    });
+  },
+
+  async runBulk(action) {
+    if (this._bulkBusy) return;
+    const accounts = this._lastAccounts.length ? this._lastAccounts : (Accounts.data || []);
+    const critical = new Set(['banned', 'deactivated', 'frozen']);
+    const targets = accounts.filter(a =>
+      !critical.has(a.status) && (action === 'start' ? !a.is_running : a.is_running)
+    );
+    if (!targets.length) {
+      toast(action === 'start' ? 'Нет доступных аккаунтов для запуска' : 'Нет работающих аккаунтов', 'info');
+      return;
+    }
+    this._bulkBusy = true;
+    this.setBulkBusy(true);
+    let ok = 0;
+    let failed = 0;
+    try {
+      for (const account of targets) {
+        try {
+          await API.post(`/accounts/${account.id}/${action}`);
+          ok++;
+        } catch (e) {
+          failed++;
+          console.warn(`[dashboard] ${action} account ${account.id}:`, e.message);
+        }
+      }
+      await this.refresh();
+      toast(
+        `${action === 'start' ? 'Запущено' : 'Остановлено'}: ${ok}` +
+        (failed ? `, ошибок: ${failed}` : ''),
+        failed ? 'error' : 'ok'
+      );
+    } finally {
+      this._bulkBusy = false;
+      this.setBulkBusy(false);
+    }
+  },
+
   startAuto() {
     this.stopAuto();
     this._timer = setInterval(() => {
@@ -1254,6 +1450,42 @@ const Dashboard = {
 document.getElementById('btn-refresh-dashboard')?.addEventListener('click', () => Dashboard.refresh());
 document.querySelectorAll('[data-goto-tab]').forEach(b => {
   b.addEventListener('click', () => gotoTab(b.dataset.gotoTab));
+});
+document.getElementById('btn-dashboard-start-all')?.addEventListener('click', () => Dashboard.runBulk('start'));
+document.getElementById('btn-dashboard-stop-all')?.addEventListener('click', () => Dashboard.runBulk('stop'));
+document.getElementById('btn-dashboard-refresh-all')?.addEventListener('click', async () => {
+  await Promise.allSettled([Dashboard.refresh(), Accounts.refresh(), refreshStatus()]);
+  toast('Главная обновлена', 'ok');
+});
+document.getElementById('btn-dashboard-pause')?.addEventListener('click', async () => {
+  const checkbox = document.getElementById('global-pause-toggle');
+  if (!checkbox) return;
+  const button = document.getElementById('btn-dashboard-pause');
+  const next = !checkbox.checked;
+  button.disabled = true;
+  try {
+    await API.post('/settings', { global_pause: next });
+    checkbox.checked = next;
+    button.textContent = next ? 'Снять паузу' : 'Пауза';
+    toast(next ? 'Глобальная пауза включена' : 'Глобальная пауза выключена', 'ok');
+    Dashboard.refresh();
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+});
+document.getElementById('btn-dashboard-discovery')?.addEventListener('click', async () => {
+  const button = document.getElementById('btn-dashboard-discovery');
+  button.disabled = true;
+  try {
+    await API.post('/discovery/start');
+    toast('Поиск каналов запущен', 'ok');
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
 });
 
 // ============ HEADER STATUS ============
@@ -1274,6 +1506,8 @@ async function refreshStatus() {
 
     const pause = document.getElementById('global-pause-toggle');
     pause.checked = !!h.global_pause;
+    const dashPause = document.getElementById('btn-dashboard-pause');
+    if (dashPause) dashPause.textContent = h.global_pause ? 'Снять паузу' : 'Пауза';
 
     document.getElementById('ch-watcher').textContent =
       h.watcher_running ? '✓' : '✗';
@@ -1472,6 +1706,35 @@ function accPhone(id) {
 }
 
 // ============ STATS ============
+async function refreshAfterStateReset() {
+  const jobs = [Stats.refresh(), Accounts.refresh(), Dashboard.refresh(), Logs.refresh()];
+  if (document.getElementById('tab-comments')?.classList.contains('active')) {
+    jobs.push(Comments.refresh());
+  }
+  await Promise.allSettled(jobs);
+}
+
+async function clearStatsAction() {
+  if (!confirm('Очистить отчётную статистику и логи? Баны и рабочее состояние сохранятся.')) return;
+  try {
+    const r = await API.post('/admin/clear-stats');
+    toast((r && r.message) || 'Очищено', 'ok');
+    await refreshAfterStateReset();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function resetOperationalAction() {
+  if (!confirm(
+    'Сбросить локальные баны каналов, обработанные посты и rate-limit? ' +
+    'Воркеры будут остановлены и запущены заново. Telegram-статусы, каналы и настройки не изменятся.'
+  )) return;
+  try {
+    const r = await API.post('/admin/reset-operational-state');
+    toast((r && r.message) || 'Рабочие состояния сброшены', 'ok');
+    await refreshAfterStateReset();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
 const Stats = {
   async refresh() {
     try {
@@ -1508,14 +1771,10 @@ const Stats = {
   },
 };
 document.getElementById('btn-refresh-stats')?.addEventListener('click', () => Stats.refresh());
-document.getElementById('btn-clear-stats')?.addEventListener('click', async () => {
-  if (!confirm('Полностью очистить статистику, комментарии, логи и баны? Действие необратимо.')) return;
-  try {
-    const r = await API.post('/admin/clear-stats');
-    toast((r && r.message) || 'Очищено', 'ok');
-    Stats.refresh();
-  } catch (e) { toast(e.message, 'error'); }
-});
+document.getElementById('btn-clear-stats')?.addEventListener('click', clearStatsAction);
+document.getElementById('btn-reset-operational')?.addEventListener('click', resetOperationalAction);
+document.getElementById('btn-dashboard-clear-stats')?.addEventListener('click', clearStatsAction);
+document.getElementById('btn-dashboard-reset-operational')?.addEventListener('click', resetOperationalAction);
 
 // ============ COMMENTS ============
 const Comments = {
@@ -2380,6 +2639,15 @@ function updateTimeoutBadges() {
       badge.textContent = `⏸ ${time}`;
       if (remaining <= 0) badge.remove();
     }
+  });
+  document.querySelectorAll('[data-join-remaining]').forEach(badge => {
+    let remaining = parseInt(badge.dataset.joinRemaining) || 0;
+    if (remaining > 0) remaining--;
+    badge.dataset.joinRemaining = remaining;
+    const text = badge.querySelector('span');
+    if (text) text.textContent = remaining > 0
+      ? Accounts.formatTime(remaining)
+      : 'готово к следующему';
   });
 }
 

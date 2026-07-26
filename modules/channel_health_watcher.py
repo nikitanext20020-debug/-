@@ -51,6 +51,7 @@ class ChannelHealthWatcher:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.is_running = False
+        self._worker_cursor = 0
         # ограничение: сколько каналов проверять за один проход
         self.batch_size = 50
         # минимальная пауза между API-вызовами в секундах (анти-флуд)
@@ -120,17 +121,22 @@ class ChannelHealthWatcher:
             self._log(f"structural exclude {channel}: {e}", "warning")
 
     def _pick_worker(self):
-        """Возвращает первого живого воркера (или None)."""
+        """Возвращает живого воркера по очереди (или None)."""
+        live_workers = []
         for w in self.workers.values():
             try:
                 if (w.is_running and getattr(w, "client", None)
                         and w.client.is_connected()
                         and getattr(w, "loop", None)
                         and w.loop.is_running()):
-                    return w
+                    live_workers.append(w)
             except Exception:
                 continue
-        return None
+        if not live_workers:
+            return None
+        worker = live_workers[self._worker_cursor % len(live_workers)]
+        self._worker_cursor += 1
+        return worker
 
     def _run_in_worker(self, worker, coro, timeout: float = 30.0):
         """Запускает корутину в loop'е воркера, возвращает результат."""
@@ -277,10 +283,8 @@ class ChannelHealthWatcher:
             # пробрасываем наверх, чтобы остановить проход
             raise
         except ValueError as e:
-            # Cannot find any entity — канал недоступен этому аккаунту
-            if "cannot find any entity" in str(e).lower():
-                self.db.delete_found_channel(name, force=True)
-                return {"action": "deleted", "reason": "не найден"}
+            # Entity lookup is account-local; one worker must not delete a
+            # shared channel that another account may still resolve.
             return {"action": "no_change", "reason": str(e)[:60]}
         except Exception as e:
             return {"action": "no_change", "reason": f"err: {str(e)[:60]}"}
