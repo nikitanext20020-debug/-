@@ -1321,7 +1321,7 @@ async def update_settings(settings: SettingsUpdate):
 @app.post("/settings/test-ai")
 async def test_ai_connection():
     """Тестирует подключение к нейросети"""
-    import aiohttp
+    from utils.async_http import AsyncHTTPClient
     
     api_key = db.get_setting("gemini_api_key", Config.GEMINI_API_KEY)
     model = db.get_setting("gemini_model", Config.GEMINI_MODEL)
@@ -1342,24 +1342,29 @@ async def test_ai_connection():
             "max_tokens": 10
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, json=payload, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
+        async with AsyncHTTPClient(timeout=30.0) as client:
+            response = await client.post(endpoint, json_data=payload, headers=headers)
+            if response.success:
+                data = response.data
+                if isinstance(data, dict):
                     reply = data.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-                    return {
-                        "status": "ok", 
-                        "message": f"✅ Нейросеть работает! Модель: {model}",
-                        "reply": reply
-                    }
                 else:
-                    error_text = await resp.text()
-                    return {
-                        "status": "error",
-                        "message": f"❌ Ошибка API ({resp.status}): {error_text[:200]}"
-                    }
+                    reply = str(data)[:100]
+                return {
+                    "status": "ok", 
+                    "message": f"✅ Нейросеть работает! Модель: {model}",
+                    "reply": reply
+                }
+            else:
+                error_data = response.data
+                error_text = str(error_data)[:200] if error_data else f"HTTP {response.status}"
+                return {
+                    "status": "error",
+                    "message": f"❌ Ошибка API ({response.status}): {error_text}"
+                }
     except Exception as e:
         return {"status": "error", "message": f"❌ Ошибка подключения: {str(e)}"}
+
 
 @app.get("/proxies")
 async def get_proxies():
