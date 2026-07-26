@@ -5,6 +5,7 @@ import unittest
 from telethon.errors import ChatGuestSendForbiddenError
 
 from backend.worker import BotWorker
+from modules.spambot_checker import SpamBotResult
 
 
 class FakeDB:
@@ -12,6 +13,8 @@ class FakeDB:
         self.banned = []
         self.excluded = []
         self.comment_updates = []
+        self.spambot_updates = []
+        self.account_status_updates = []
 
     def mark_banned(self, account_id, channel):
         self.banned.append((account_id, channel))
@@ -23,6 +26,12 @@ class FakeDB:
     def update_channel_comments_status(self, channel, has_open_comments, **kwargs):
         self.comment_updates.append((channel, has_open_comments, kwargs))
         return True
+
+    def update_spambot_status(self, account_id, status, message, **kwargs):
+        self.spambot_updates.append((account_id, status, message, kwargs))
+
+    def update_account_status(self, account_id, status):
+        self.account_status_updates.append((account_id, status))
 
 
 class FakeClient:
@@ -59,6 +68,39 @@ class WorkerCommentRecoveryTests(unittest.IsolatedAsyncioTestCase):
         worker._resolve_send_as = no_send_as
         return worker, db
 
+    def make_status_worker(self):
+        db = FakeDB()
+        worker = BotWorker.__new__(BotWorker)
+        worker.account_id = 1
+        worker.db = db
+        worker.is_running = True
+        worker.log = lambda *args, **kwargs: None
+        worker._update_account_status = lambda status: db.update_account_status(
+            worker.account_id, status
+        )
+        return worker, db
+
+    def test_limited_spambot_result_marks_comments_blocked(self):
+        worker, db = self.make_status_worker()
+
+        worker._apply_spambot_result(
+            SpamBotResult("limited", "Пока действуют ограничения")
+        )
+
+        self.assertEqual(db.spambot_updates[0][1], "limited")
+        self.assertEqual(db.account_status_updates, [(1, "spamblock")])
+        self.assertTrue(worker._comments_blocked)
+
+    def test_ok_spambot_result_clears_temporary_restriction(self):
+        worker, db = self.make_status_worker()
+        worker._comments_blocked = True
+
+        worker._apply_spambot_result(SpamBotResult("ok", "Ограничений нет"))
+
+        self.assertEqual(db.spambot_updates[0][1], "ok")
+        self.assertEqual(db.account_status_updates, [(1, "active")])
+        self.assertFalse(worker._comments_blocked)
+
     async def test_guest_forbidden_joins_and_retries_exactly_once(self):
         worker, db = self.make_worker(linked_chat_id=777)
         join_calls = []
@@ -80,6 +122,39 @@ class WorkerCommentRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(join_calls, [(777, "testingcatalog")])
         self.assertEqual(db.banned, [])
         self.assertEqual(db.excluded, [])
+
+    async def test_comment_send_is_skipped_while_account_restriction_is_active(self):
+        worker, db = self.make_worker(linked_chat_id=777)
+        worker._comments_blocked = True
+
+        result = await worker._send_comment_message(
+            types.SimpleNamespace(id=55, username="restrictedchan"),
+            "comment",
+            10,
+            channel_name="restrictedchan",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(worker.client.send_calls, 0)
+
+    async def test_spambot_check_respects_cooldown(self):
+        worker, db = self.make_status_worker()
+        worker.spambot_checker = types.SimpleNamespace()
+        calls = []
+
+        async def check(**kwargs):
+            calls.append(kwargs)
+            return SpamBotResult("ok", "Ограничений нет")
+
+        worker.spambot_checker.check = check
+        worker._last_spambot_check = 0
+        worker._spambot_check_interval_seconds = 900
+        worker._spambot_cooldown_seconds = 900
+
+        await worker._maybe_check_spambot(force=True, reason="test")
+        await worker._maybe_check_spambot(reason="test")
+
+        self.assertEqual(len(calls), 1)
 
     async def test_pending_join_is_not_banned_and_not_retried(self):
         worker, db = self.make_worker(linked_chat_id=888)

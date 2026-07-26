@@ -115,6 +115,8 @@ class BotWorker:
         
         # Список pending tasks для отмены при остановке
         self._pending_tasks: List[asyncio.Future] = []
+        self._join_in_progress = False
+        self._join_scheduler_task = None
         
         # Кэш вступленных групп обсуждений (чтобы не вступать повторно каждый цикл)
         self._joined_discussion_groups: set = set()
@@ -142,6 +144,15 @@ class BotWorker:
         # Защита от слишком частых обращений к @SpamBot
         self._last_spambot_check: float = 0.0
         self._spambot_cooldown_seconds: int = 600  # 10 мин
+        self._spambot_check_interval_seconds: int = int(
+            getattr(Config, "SPAMBOT_CHECK_INTERVAL_SECONDS", 900)
+        )
+        self._comments_blocked: bool = False
+        try:
+            spam_state = self.db.get_spambot_status(self.account_id)
+            self._comments_blocked = bool(spam_state.get("comment_blocked"))
+        except Exception:
+            pass
         # Трекинг счётчика PeerFloodError (для эскалации)
         self._peer_flood_count: int = 0
         # Кэш чатов, которые уже признали мусором — не проверяем повторно
@@ -442,6 +453,9 @@ class BotWorker:
         ChatGuestSendForbiddenError: join linked discussion and retry exactly
         once (_guest_retry prevents recursion). Never leave on guest-forbidden.
         """
+        if getattr(self, "_comments_blocked", False):
+            return None
+
         send_as = await self._resolve_send_as()
         try:
             if send_as is not None:
@@ -681,11 +695,19 @@ class BotWorker:
                     me = self.loop.run_until_complete(me_res)
                 else:
                     me = me_res
-                    
+
                 if me and me.restricted:
-                    self.log("🚫 Аккаунт ограничен Telegram!", "error")
-                    self._update_account_status("banned")
-                    raise Exception("Аккаунт ограничен (restricted) Telegram")
+                    # Telegram's `restricted` flag can mean a temporary
+                    # anti-spam limitation, not a deleted/frozen account.
+                    # Keep safe worker features alive and let SpamBot give
+                    # the authoritative comment restriction state.
+                    self.log(
+                        "⚠️ Аккаунт ограничен Telegram: комментарии будут "
+                        "приостановлены до повторной проверки SpamBot",
+                        "warning",
+                    )
+                    self._comments_blocked = True
+                    self._update_account_status("spamblock")
                 
                 # Проверяем заморозку - пробуем выполнить простое действие
                 try:
@@ -718,6 +740,9 @@ class BotWorker:
                     raise Exception("Аккаунт заморожен")
                 raise  # Пробрасываем другие ошибки
             
+            current_account = self.db.get_account(self.account_id) or {}
+            if current_account.get("status") in ("stopped", "active", "starting"):
+                self._update_account_status("active")
             self.is_running = True
             self.log("✅ Воркер успешно запущен")
             
@@ -743,9 +768,6 @@ class BotWorker:
             self.inviter = Inviter(self.client, self.db, self.account_id)
             self.mass_sender = MassSender(self.client, self.db, self.account_id)
             self.channel_filter = ChannelFilter(self.client, self.db, self.account_id)
-            
-            # Вступаем в каналы из channels_to_join.txt при запуске
-            self.loop.run_until_complete(self._join_pending_channels())
             
             # Запускаем основной цикл
             self.loop.run_until_complete(self._run_loop())
@@ -808,9 +830,6 @@ class BotWorker:
                 self.log(f"⏸️ Аккаунт на паузе (rate limit). Ожидание {wait_time} сек...")
                 await asyncio.sleep(min(wait_time, 3600))
         
-        # Вступаем в каналы из channels_to_join.txt (включая приватные)
-        await self._join_pending_channels()
-        
         # Первичная синхронизация при запуске
         self.log("🚀 Синхронизация ваших подписок и каналов...")
         await self._sync_user_subscriptions()
@@ -825,11 +844,19 @@ class BotWorker:
                 self.log(f"✅ Профиль: {first_name} (@{username})", "info")
         except Exception as e:
             self.log(f"⚠️ Не удалось получить профиль: {e}", "warning")
+
+        self._join_scheduler_task = asyncio.create_task(
+            self._join_scheduler_loop(),
+            name=f"join-scheduler-{self.account_id}",
+        )
         
         while not self._should_stop():
             try:
                 # Per-cycle account pause from DB (PeerFlood hard pause etc.)
                 if self._db_should_pause():
+                    # Re-check while paused so a temporary restriction can
+                    # clear itself without waiting for a manual restart.
+                    await self._maybe_check_spambot(reason="периодическая проверка")
                     wait_time = self._db_pause_seconds() or 60
                     self.log(f"⏸️ Аккаунт на паузе. Ожидание {wait_time} сек...")
                     # Sleep in chunks so stop() remains responsive
@@ -862,6 +889,8 @@ class BotWorker:
                 
                 cycle += 1
                 self.log(f"🔄 Цикл #{cycle}")
+
+                await self._maybe_check_spambot(reason="периодическая проверка")
                 
                 # Обновляем список активных каналов (исключаем забаненные для этого аккаунта)
                 self._update_active_channels()
@@ -872,10 +901,6 @@ class BotWorker:
                 # Логика общения в чатах
                 if self._get_cached_setting("chat_interaction_enabled", True):
                     await self._process_chats()
-                
-                # Постепенное вступление в каналы из базы (1 канал за цикл)
-                if cycle % 3 == 0:  # Каждые 3 цикла
-                    await self._gradual_join_from_database()
                 
                 # Автоматический инвайтинг (парсинг + приглашение батча)
                 auto_invite_interval = int(self._get_cached_setting("auto_invite_interval_cycles", 5) or 5)
@@ -889,9 +914,6 @@ class BotWorker:
                     self.log("📡 Повторная проверка подписок...")
                     await self._sync_user_subscriptions()
                     
-                    # Вступаем в новые каналы (могли добавиться из рекламы)
-                    await self._join_pending_channels()
-                
                 search_interval = max(1, int(self._get_cached_setting("search_interval_cycles", 20)))
                 if cycle % search_interval == 0 and self._get_cached_setting("search_enabled", Config.SEARCH_ENABLED):
                     raw_keywords = self.db.get_setting("search_keywords", "")
@@ -1004,6 +1026,9 @@ class BotWorker:
         self.active_channels = [ch for ch in all_channels if ch.lstrip('@') not in banned_channels]
 
     async def _process_channels(self):
+        if getattr(self, "_comments_blocked", False):
+            return
+
         mode = self._get_current_mode()
         prob = Config.MODE_PROBABILITY.get(mode, 1.0)
         
@@ -1476,7 +1501,8 @@ class BotWorker:
             except FloodWaitError as e:
                 # Обработка FloodWait с буфером +10 секунд
                 wait_seconds = e.seconds + 10
-                is_paused = self.health_monitor.record_flood_wait(self.account_id, e.seconds)
+                self._record_account_flood_wait(e.seconds)
+                is_paused = e.seconds >= 3600
                 
                 # Разблокируем канал
                 self.db.unlock_channel(name)
@@ -1503,6 +1529,10 @@ class BotWorker:
             except ChatWriteForbiddenError:
                 # Account-local only — NEVER set global can_comment=false from write-forbidden
                 self.log(f"⚠️ Нет прав писать в {name}, помечаю как забанен в канале", "warning")
+                await self._maybe_check_spambot(
+                    force=True,
+                    reason=f"ошибка комментария в {name}",
+                )
                 self.db.mark_banned(self.account_id, name)
                 self.db.mark_post_processed(self.account_id, name, post.id)
                 self.db.unlock_channel(name)
@@ -1555,6 +1585,10 @@ class BotWorker:
             except UserBannedInChannelError:
                 # Бан в конкретном канале — аккаунт в остальных каналах работает нормально
                 self.log(f"🚫 Аккаунт забанен в канале {name}. Помечаю, пропускаю.", "warning")
+                await self._maybe_check_spambot(
+                    force=True,
+                    reason=f"ошибка комментария в {name}",
+                )
                 self.db.mark_banned(self.account_id, name)
                 self.db.mark_post_processed(self.account_id, name, post.id)
                 self.db.unlock_channel(name)
@@ -1583,6 +1617,10 @@ class BotWorker:
                 # ChatWriteForbidden - нет прав писать (не бан аккаунта, а ограничение канала)
                 if "chatwriteforbidden" in err_str or "can't write" in err_str:
                     self.log(f"⚠️ Нет прав писать в {name}, помечаю как забанен в канале", "warning")
+                    await self._maybe_check_spambot(
+                        force=True,
+                        reason=f"ошибка комментария в {name}",
+                    )
                     self.db.mark_banned(self.account_id, name)
                     self.db.mark_post_processed(self.account_id, name, post.id)
                     self.db.unlock_channel(name)  # Разблокируем канал
@@ -1702,6 +1740,10 @@ class BotWorker:
     def _get_current_mode(self) -> str:
         """Определяет текущий режим работы на основе настроек и времени"""
         try:
+            account_override = self.db.get_account_mode_override(self.account_id)
+            if account_override in Config.MODE_DELAY_MULT:
+                return account_override
+
             global_mode = self.db.get_setting("work_mode", "neutral")
             
             # Если включен авто-ночной режим
@@ -1852,7 +1894,7 @@ class BotWorker:
         except Exception as e:
             self.log(f"⚠️ Ошибка в чат-модуле: {e}", "error")
 
-    async def _join_pending_channels(self):
+    async def _join_next_channel(self):
         """Вступает в каналы из БД (поддерживает каналы с модерацией)"""
         # Получаем каналы из БД со статусом 'new' или без channel_id (не вступили)
         all_channels = self.db.get_found_channels(limit=50, only_open_comments=True)
@@ -1879,7 +1921,7 @@ class BotWorker:
         
         self.log(f"📥 Вступаю в {len(channels_to_join)} новых каналов...")
         
-        for channel in channels_to_join:
+        for channel in channels_to_join[:1]:
             # ✅ КРИТИЧНЫЕ ПРОВЕРКИ В НАЧАЛЕ ЦИКЛА
             if not self.is_running:
                 self.log("Воркер остановлен, прерываю цикл вступлений", "info")
@@ -1999,14 +2041,60 @@ class BotWorker:
                     # Помечаем как обработанный чтобы не пытаться снова
                     self.db.mark_invite_processed(self.account_id, channel)
                 
-                # Задержка между вступлениями
-                await asyncio.sleep(random.randint(10, 30))
-                
             except Exception as e:
                 self.log(f"❌ Ошибка вступления в {channel}: {e}", "error")
         
         # Проверяем pending requests после обработки новых каналов
         await self._check_pending_join_requests()
+        return True
+
+    async def _join_scheduler_step(self, now=None):
+        """Один неблокирующий шаг очереди вступлений."""
+        now = time.time() if now is None else float(now)
+        if self._should_stop():
+            return {"action": "stopped", "sleep": 0}
+
+        account = self.db.get_account(self.account_id) or {}
+        status = str(account.get("status") or "").lower()
+        if status in {"banned", "deactivated", "frozen", "frozen_join"}:
+            return {"action": "blocked", "sleep": 30}
+
+        state = self.db.get_account_join_state(self.account_id, now=now)
+        if state["mode"] == "off":
+            return {"action": "off", "sleep": 60}
+        if self._db_should_pause() or is_global_paused():
+            return {"action": "paused", "sleep": 30}
+        if state["next_join_at"] is None:
+            state = self.db.schedule_next_account_join(self.account_id, now=now)
+        if state["remaining_seconds"] > 0:
+            return {"action": "waiting", "sleep": min(30, state["remaining_seconds"])}
+        if self._join_in_progress:
+            return {"action": "busy", "sleep": 5}
+
+        self._join_in_progress = True
+        try:
+            joined = await self._join_next_channel()
+        finally:
+            self._join_in_progress = False
+        state = self.db.schedule_next_account_join(self.account_id, now=now)
+        return {
+            "action": "joined" if joined else "idle",
+            "sleep": min(30, max(1, state["remaining_seconds"])),
+        }
+
+    async def _join_scheduler_loop(self):
+        """Долгоживущая очередь; задержки не блокируют комментинг."""
+        while not self._should_stop():
+            try:
+                result = await self._join_scheduler_step()
+                if result["action"] == "stopped":
+                    break
+                await asyncio.sleep(max(1, min(30, int(result.get("sleep", 30)))))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.log(f"⚠️ Ошибка scheduler вступлений: {exc}", "error")
+                await asyncio.sleep(30)
 
     async def _check_pending_join_requests(self):
         """Проверяет статус pending join requests (каналы с модерацией)"""
@@ -2074,7 +2162,7 @@ class BotWorker:
         except Exception as e:
             self.log(f"⚠️ Ошибка проверки pending requests: {e}", "error")
 
-    async def _gradual_join_from_database(self):
+    async def _legacy_join_unused(self):
         """
         Постепенно вступает в каналы из базы данных (1 канал за вызов).
         Для новых аккаунтов с warmup_mode - увеличенные задержки.
@@ -2850,43 +2938,97 @@ class BotWorker:
         Используется при PeerFloodError, если включён spambot_unblock.
         Применяется cooldown 10 минут, чтобы не спамить @SpamBot.
         """
-        now = time.time()
-        if now - self._last_spambot_check < self._spambot_cooldown_seconds:
-            self.log("⏳ @SpamBot уже опрашивался недавно, пропускаю", "warning")
-            return
-        self._last_spambot_check = now
+        await self._maybe_check_spambot(force=True, reason=reason)
 
-        if self.spambot_checker is None:
+    def _apply_spambot_result(self, result):
+        """Сохраняет статус SpamBot и меняет только нужную часть работы."""
+        status = (getattr(result, "status", "") or "unknown").lower()
+        message = (
+            getattr(result, "message", "")
+            or getattr(result, "raw_response", "")
+            or ""
+        ).strip()
+
+        try:
+            self.db.update_spambot_status(self.account_id, status, message)
+        except Exception as e:
+            self.log(f"⚠️ Не удалось сохранить статус @SpamBot: {e}", "warning")
+
+        if status in ("limited", "blocked"):
+            self._comments_blocked = True
+            self._update_account_status("spamblock")
+            level = "error" if status == "blocked" else "warning"
+            label = "заблокирован" if status == "blocked" else "ограничен"
+            self.log(
+                f"🚫 @SpamBot: аккаунт {label}; комментарии приостановлены. "
+                f"{message[:160]}",
+                level,
+            )
+            if status == "blocked":
+                self.is_running = False
+            return
+
+        if status in ("ok", "unblocked"):
+            was_blocked = bool(getattr(self, "_comments_blocked", False))
+            self._comments_blocked = False
+
+            current_status = None
+            try:
+                account = self.db.get_account(self.account_id)
+                current_status = (account or {}).get("status")
+            except Exception:
+                pass
+
+            # Do not overwrite an unrelated frozen/banned state. Only clear
+            # the temporary status created by this checker.
+            if was_blocked and (current_status in (None, "spamblock")):
+                self._update_account_status("active")
+                try:
+                    self.db.reset_account_health(self.account_id)
+                except Exception:
+                    pass
+
+            self.log(
+                "✅ @SpamBot: ограничений на комментарии нет, работа разрешена. "
+                f"{message[:160]}"
+            )
+            return
+
+        self.log(
+            f"❓ @SpamBot: статус не определён, прежнее состояние сохранено. "
+            f"{message[:160]}",
+            "warning",
+        )
+
+    async def _maybe_check_spambot(self, force: bool = False, reason: str = ""):
+        """Периодически проверяет SpamBot и не спамит его повторными запросами."""
+        now = time.time()
+        interval = int(
+            getattr(self, "_spambot_check_interval_seconds", 900) or 900
+        )
+        cooldown = int(
+            getattr(self, "_spambot_cooldown_seconds", 600) or 600
+        )
+        min_interval = cooldown if force else interval
+        if now - getattr(self, "_last_spambot_check", 0.0) < min_interval:
+            return False
+
+        self._last_spambot_check = now
+        if getattr(self, "spambot_checker", None) is None:
             self.spambot_checker = SpamBotChecker(self.client)
 
-        self.log(f"🤖 Иду в @SpamBot ({reason})...")
+        self.log(f"🤖 Проверяю @SpamBot{f' ({reason})' if reason else ''}...")
         try:
-            res = await self.spambot_checker.check(press_buttons=True, wait_seconds=4.0)
+            result = await self.spambot_checker.check(
+                press_buttons=False,
+                wait_seconds=4.0,
+            )
         except Exception as e:
             self.log(f"⚠️ Ошибка @SpamBot: {e}", "warning")
-            return
+            return False
 
-        # Логируем итог + обновляем статус аккаунта при необходимости
-        msg_short = res.message[:120] if res.message else ""
-        if res.status == "ok":
-            self.log(f"✅ @SpamBot: всё чисто. {msg_short}")
-        elif res.status == "unblocked":
-            self.log(f"✅ @SpamBot снял блок. {msg_short}")
-        elif res.status == "limited":
-            unblock = (res.will_unblock_at.isoformat()
-                       if res.will_unblock_at else "неизвестно")
-            self.log(
-                f"⚠️ @SpamBot: спам-блок активен (до {unblock}). {msg_short}",
-                "warning",
-            )
-            self._update_account_status("spamblock")
-        elif res.status == "blocked":
-            self.log(f"🚫 @SpamBot: аккаунт заблокирован. {msg_short}", "error")
-            self._update_account_status("spamblock")
-            # Снимаем с работы — нет смысла продолжать
-            self.is_running = False
-        else:
-            self.log(f"❓ @SpamBot: неопознанный статус. {msg_short}", "warning")
+        self._apply_spambot_result(result)
+        return True
 
     async def _maybe_leave_junk_chats(self):
         """
@@ -3016,6 +3158,14 @@ class BotWorker:
     async def _graceful_shutdown(self):
         """Корректное завершение всех ресурсов"""
         self.log("🔄 Начинаю graceful shutdown...")
+
+        if self._join_scheduler_task and not self._join_scheduler_task.done():
+            self._join_scheduler_task.cancel()
+            try:
+                await self._join_scheduler_task
+            except asyncio.CancelledError:
+                pass
+            self._join_scheduler_task = None
         
         # Останавливаем channel_explorer если запущен
         if self.channel_explorer:
@@ -3032,6 +3182,13 @@ class BotWorker:
             await close_http_client()
         except Exception as e:
             self.log(f"⚠️ Ошибка закрытия HTTP клиента: {e}", "warning")
+
+        for module in (self.comment_generator, self.autoresponder):
+            if module and hasattr(module, "close"):
+                try:
+                    await module.close()
+                except Exception as e:
+                    self.log(f"⚠️ Ошибка закрытия AI HTTP клиента: {e}", "warning")
         
         # Закрываем junk classifier (его собственный HTTP клиент)
         if self.junk_classifier:
@@ -3055,6 +3212,9 @@ class BotWorker:
         self._shutdown_flag = True
         # NOTE: do NOT set process-global _shutdown_requested here —
         # that flag is reserved for SIGTERM/SIGINT so other workers keep running.
+
+        if self._join_scheduler_task and hasattr(self, "loop") and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self._join_scheduler_task.cancel)
         
         # Отменяем все pending tasks
         self._cancel_pending_tasks()
@@ -3114,4 +3274,3 @@ class BotWorker:
                 self.log(f"⚠️ Ошибка при освобождении session lock: {e}", "warning")
 
         self.log("🛑 Воркер остановлен")
-

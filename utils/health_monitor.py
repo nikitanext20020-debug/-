@@ -84,10 +84,40 @@ class HealthMonitor:
             
             return AccountHealth(account_id=account_id)
     
-    def _save_to_db(self, health: AccountHealth):
+    def _save_to_db(self, health: AccountHealth, *, force: bool = False):
         """Сохраняет состояние здоровья в БД"""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
+
+            # Не затираем более новый FloodWait, записанный другим модулем
+            # напрямую в БД, устаревшим объектом из памяти воркера.
+            current = cursor.execute(
+                """
+                SELECT health_status, rate_limited_until
+                FROM accounts WHERE id = ?
+                """,
+                (health.account_id,),
+            ).fetchone()
+            current_rate = None
+            if current and current["rate_limited_until"]:
+                try:
+                    current_rate = datetime.fromisoformat(
+                        str(current["rate_limited_until"])
+                    )
+                    if current_rate.tzinfo is None:
+                        current_rate = current_rate.replace(
+                            tzinfo=self._get_msk_now().tzinfo
+                        )
+                except Exception:
+                    current_rate = None
+            if (
+                not force
+                and current_rate
+                and current_rate > self._get_msk_now()
+            ):
+                health.rate_limited_until = current_rate
+                if current["health_status"] in ("rate_limited", "paused"):
+                    health.status = current["health_status"]
             
             last_success_str = None
             if health.last_success:
@@ -113,10 +143,10 @@ class HealthMonitor:
             ))
     
     def get_status(self, account_id: int) -> AccountHealth:
-        """Возвращает текущий статус аккаунта"""
-        if account_id not in self._cache:
-            self._cache[account_id] = self._load_from_db(account_id)
-        return self._cache[account_id]
+        """Возвращает актуальный статус аккаунта из БД"""
+        health = self._load_from_db(account_id)
+        self._cache[account_id] = health
+        return health
     
     def record_success(self, account_id: int):
         """Записывает успешную операцию"""
@@ -163,23 +193,11 @@ class HealthMonitor:
         Returns:
             True если аккаунт помечен как rate-limited (FloodWait > 1 час)
         """
-        health = self.get_status(account_id)
-        
-        # Добавляем буфер 10 секунд
-        wait_until = self._get_msk_now() + timedelta(seconds=seconds + 10)
-        health.rate_limited_until = wait_until
-        
-        # Если FloodWait больше часа - помечаем как rate-limited
-        if seconds >= self.FLOOD_WAIT_PAUSE_THRESHOLD:
-            health.status = "paused"
-            is_paused = True
-        else:
-            is_paused = False
-        
-        self._cache[account_id] = health
-        self._save_to_db(health)
-        
-        return is_paused
+        # Единый DB-путь также пишет rate_limit_history, поэтому FloodWait из
+        # любого модуля виден Dashboard и не расходится с worker state.
+        self.db.record_flood_wait(account_id, seconds)
+        self._cache[account_id] = self._load_from_db(account_id)
+        return seconds >= self.FLOOD_WAIT_PAUSE_THRESHOLD
     
     def should_pause(self, account_id: int) -> bool:
         """Проверяет, нужно ли приостановить аккаунт"""
@@ -234,4 +252,4 @@ class HealthMonitor:
         """Сбрасывает состояние здоровья аккаунта"""
         health = AccountHealth(account_id=account_id)
         self._cache[account_id] = health
-        self._save_to_db(health)
+        self._save_to_db(health, force=True)

@@ -222,6 +222,43 @@ class DatabaseRegressionTests(unittest.TestCase):
         self.assertGreater(secs, 40000)
         self.assertTrue(self.db.should_pause_account(self.account_id))
 
+    def test_flood_wait_is_recorded_in_rate_limit_history_and_stats(self):
+        self.db.record_flood_wait(self.account_id, 90)
+
+        history = self.db.get_rate_limit_history(self.account_id)
+        stats = self.db.get_rate_limit_stats(self.account_id)
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["action"], "flood_wait")
+        self.assertEqual(history[0]["duration_seconds"], 90)
+        self.assertEqual(stats["total_limits"], 1)
+        self.assertEqual(stats["last_limit"]["action"], "flood_wait")
+        self.assertEqual(stats["by_action"], {"flood_wait": 1})
+
+    def test_spambot_status_round_trip_and_clear(self):
+        self.db.update_spambot_status(
+            self.account_id,
+            "limited",
+            "Пока действуют ограничения",
+            checked_at="2026-07-26 18:00:00",
+        )
+        limited = self.db.get_spambot_status(self.account_id)
+        self.assertEqual(limited["spambot_status"], "limited")
+        self.assertEqual(limited["comment_status"], "restricted")
+        self.assertTrue(limited["comment_blocked"])
+        self.assertEqual(limited["spambot_checked_at"], "2026-07-26 18:00:00")
+
+        self.db.update_spambot_status(
+            self.account_id,
+            "ok",
+            "There are no limits on your account.",
+            checked_at="2026-07-26 18:15:00",
+        )
+        clear = self.db.get_spambot_status(self.account_id)
+        self.assertEqual(clear["spambot_status"], "ok")
+        self.assertEqual(clear["comment_status"], "available")
+        self.assertFalse(clear["comment_blocked"])
+
 
 class ExistingDatabaseMigrationTests(unittest.TestCase):
     def test_old_exclusion_and_campaign_tables_are_upgraded(self):

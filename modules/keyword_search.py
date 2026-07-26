@@ -7,6 +7,7 @@ from telethon import TelegramClient
 from telethon.tl.types import Channel, Chat, ChannelFull
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.contacts import SearchRequest
+from telethon.utils import get_peer_id
 from config import Config
 from utils.database import Database
 
@@ -156,7 +157,72 @@ class KeywordSearch:
                 await asyncio.sleep(5)
         
         return found_channels
-    
+
+    async def search_groups_by_keywords(
+        self,
+        keywords: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """Ищет группы/супергруппы и сохраняет sendable peer ID в found_chats."""
+        raw_keywords = keywords if keywords is not None else self.keywords
+        normalized_keywords = []
+        seen_keywords = set()
+        for item in raw_keywords or []:
+            keyword = str(item).strip()
+            key = keyword.casefold()
+            if keyword and key not in seen_keywords:
+                seen_keywords.add(key)
+                normalized_keywords.append(keyword)
+
+        if not normalized_keywords or not self._is_client_connected():
+            return []
+
+        found_groups = []
+        seen_peer_ids = set()
+        for keyword in normalized_keywords:
+            if not self._is_client_connected():
+                break
+            try:
+                result = await self.client(SearchRequest(q=keyword, limit=50))
+            except Exception as e:
+                print(f"  ❌ Ошибка поиска групп по '{keyword}': {e}")
+                continue
+
+            for peer in result.chats:
+                is_basic_group = isinstance(peer, Chat)
+                is_supergroup = (
+                    isinstance(peer, Channel)
+                    and not bool(getattr(peer, "broadcast", False))
+                    and bool(
+                        getattr(peer, "megagroup", False)
+                        or getattr(peer, "gigagroup", False)
+                    )
+                )
+                if not (is_basic_group or is_supergroup):
+                    continue
+
+                peer_id = abs(int(get_peer_id(peer)))
+                if peer_id in seen_peer_ids:
+                    continue
+                seen_peer_ids.add(peer_id)
+
+                item = {
+                    "chat": peer_id,
+                    "title": getattr(peer, "title", "") or str(peer_id),
+                    "members_count": int(
+                        getattr(peer, "participants_count", 0) or 0
+                    ),
+                    "keyword": keyword,
+                }
+                found_groups.append(item)
+                self.db.add_found_chat(
+                    item["chat"],
+                    item["title"],
+                    item["members_count"],
+                    item["keyword"],
+                )
+
+        return found_groups
+
     async def search_all(self, auto_add_to_active: bool = True) -> Dict:
         """
         Выполняет полный поиск: находит качественные каналы и добавляет их в ротацию
